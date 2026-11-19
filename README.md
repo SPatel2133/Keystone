@@ -140,6 +140,7 @@ bin/shopify-status                                   # every configured shop
 bin/shopify-status example.myshopify.com
 bin/shopify-status --prometheus                      # metrics text for a scraper
 bin/reconcile --all                                  # every configured shop, e.g. from cron
+bin/shopify-backup /backups/ledger-$(date +%F).sqlite3
 bin/shopify-deliveries list example.myshopify.com --state parked
 bin/shopify-deliveries retry example.myshopify.com WEBHOOK_ID
 bin/shopify-audit example.myshopify.com --order gid://shopify/Order/101
@@ -156,6 +157,7 @@ bin/shopify-audit example.myshopify.com --order gid://shopify/Order/101
   hours old, reconciliation that has never completed, or unreadable totals.
 - `--prometheus` prints the same counts and ages in Prometheus text format: health, deliveries by state, oldest pending age, checkpoint age, open runs and transactions by source. The exit status is the same as for JSON. Money totals are left out on purpose: metric samples are floats, and totals must stay exact.
 - `bin/reconcile --all` reconciles each configured shop in turn and prints one result per shop. A shop that fails is reported, does not stop the others, and makes the command exit 1. Its run stays resumable.
+- `bin/shopify-backup DEST` copies the live database with SQLite's online backup API while webhooks and workers keep writing. The copy is one committed snapshot, so every processed delivery has its payments. It passes `PRAGMA integrity_check` and the current schema check before it is renamed into place. The command refuses to overwrite an existing file and never leaves a partial copy. It prints the copy's delivery, transaction and per-shop totals so they can be compared with the live database.
 - After `max_attempts` failed attempts (1 to 1000, default 12) a delivery is
   **parked**. The worker never selects it again, so a poison order cannot use
   up worker time, and other orders keep flowing. `bin/shopify-deliveries list`

@@ -11,6 +11,7 @@ module ShopifyLedger
       return deliveries(arguments) if command == :deliveries
       return status(arguments) if command == :status
       return audit(arguments) if command == :audit
+      return backup(arguments) if command == :backup
 
       return reconcile_all if command == :reconcile && arguments == ["--all"]
 
@@ -76,6 +77,17 @@ module ShopifyLedger
       end
       puts JSON.generate(shops: results)
       results.any? { |result| result.key?(:error) } ? 1 : 0
+    end
+
+    def self.backup(arguments)
+      require_relative "backup"
+      raise ArgumentError, "usage: bin/shopify-backup DESTINATION" unless arguments.size == 1
+
+      puts JSON.generate(Backup.new(Config.load).create(arguments.first))
+      0
+    rescue Backup::Refused => error
+      warn "shopify ledger: backup refused: #{error.message}"
+      1
     end
 
     # Exit 0 when every shop is healthy, 2 when any shop needs attention.
