@@ -169,6 +169,8 @@ After the fixes, the same run had 0 failures in 27 s.
 
 `bin/shopify-fuzz --processes --seed 600000 --runs 100 --steps 300` performed 30,000 operations with 0 failures in 366.9 s. They included 554 rounds of 2–4 concurrent `--drain` processes, 594 workers SIGKILLed mid-fetch and 913 shop moves.
 
+`bin/shopify-fuzz --postgres --processes --seed 700000 --runs 100 --steps 300` performed 30,000 operations with 0 failures in 498.0 s. They included 588 rounds of concurrent multi-machine `bin/shopify-pg-worker --drain` processes, 567 workers SIGKILLed mid-fetch and 1,433 reconciliations.
+
 ## Drain throughput: SQLite and PostgreSQL
 
 `ruby benchmark/shopify_drain.rb ORDERS 50 UPDATES [sqlite|postgres]` uses a fake Admin API that adds 50 ms of latency. Local Docker `postgres:16-alpine` was used, and a fuzz campaign was running on the same machine at the time.
