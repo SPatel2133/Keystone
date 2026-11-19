@@ -16,6 +16,7 @@ module ShopifyLedger
       end
 
       return deliveries(arguments) if command == :deliveries
+      return status(arguments) if command == :status
 
       script = command == :summary ? "shopify-summary" : "reconcile"
       raise ArgumentError, "usage: bin/#{script} SHOP" unless arguments.size == 1
@@ -36,6 +37,18 @@ module ShopifyLedger
     rescue StandardError => error
       warn "shopify ledger: #{error.class}: #{error.message}"
       1
+    end
+
+    # Exit 0 when every shop is healthy, 2 when any shop needs attention.
+    def self.status(arguments)
+      raise ArgumentError, "usage: bin/shopify-status [SHOP]" if arguments.size > 1
+
+      require_relative "status"
+      config = Config.load
+      shops = arguments.empty? ? config.shops : arguments.each { |shop| config.api(shop) }
+      report = Status.new(config).report(shops)
+      puts JSON.generate(generated_at: Time.now.utc.iso8601, shops: report)
+      report.all? { |shop| shop[:health] == "ok" } ? 0 : 2
     end
 
     DELIVERIES_USAGE = "usage: bin/shopify-deliveries list SHOP [--state STATE] | retry SHOP WEBHOOK_ID"
