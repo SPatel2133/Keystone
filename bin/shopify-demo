@@ -12,11 +12,11 @@ missed = ShopifyScenarios.missed_webhook
 if ARGV == ["--evidence"]
   project = File.expand_path("..", __dir__)
   paths = %w[Gemfile Gemfile.lock .github/workflows/verify.yml bin/reconcile bin/shopify-*
-             lib/event_consumer/bundle.rb lib/shopify_ledger/*.rb
-             test/shopify/*.rb test/support/crash_harness.rb test/support/shopify*]
+             lib/event_consumer/bundle.rb lib/shopify_ledger/**/*.rb
+             test/shopify/*.rb test/support/crash_harness.rb test/support/shopify* test/support/shopify*/**/*]
   digest = Digest::SHA256.new
   Dir.chdir(project) do
-    Dir.glob(paths).sort.each do |path|
+    Dir.glob(paths).select { |path| File.file?(path) }.uniq.sort.each do |path|
       digest.update(path + "\0" + Digest::SHA256.file(path).hexdigest + "\n")
     end
   end
