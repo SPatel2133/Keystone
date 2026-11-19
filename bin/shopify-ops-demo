@@ -1,0 +1,79 @@
+#!/usr/bin/env ruby
+# Deterministic operator walkthrough against a local fake Shopify Admin API and
+# a disposable database: a poison delivery is parked and recovered, a failed
+# reconciliation resumes at its saved page, and audit explains the totals.
+require_relative "../lib/event_consumer/bundle"
+require_relative "../test/support/shopify_scenarios"
+
+abort "usage: bin/shopify-ops-demo" unless ARGV.empty?
+
+def check(condition, message)
+  raise "demo invariant failed: #{message}" unless condition
+end
+
+THIRD = "gid://shopify/Order/103".freeze
+ALPHA = ShopifyFixture::ALPHA
+OUTAGE = { errors: [{ message: "synthetic outage" }] }.freeze
+
+ShopifyFixture.run do |run|
+  status = lambda do
+    stdout, _stderr, process = run.command("bin/shopify-status", ALPHA)
+    [JSON.parse(stdout).fetch("shops").first, process.exitstatus]
+  end
+  net = -> { run.summary.fetch("totals").map { |t| "#{t["currency"]} #{t["net"]}" }.join(", ") }
+
+  run.configure(max_attempts: 2)
+  run.admin.order([ShopifyScenarios.sale])
+  run.admin.arrange(ALPHA, "OrderPayments", ShopifyFixture::OTHER_ORDER, OUTAGE, code: 503)
+  run.with_endpoint do
+    check(run.deliver("sale-101") == 200, "sale webhook accepted")
+    check(run.deliver("refund-102", payload: { id: 102 }) == 200, "refund webhook accepted")
+  end
+  puts "1. Webhooks for orders 101 and 102 committed to the inbox before HTTP 200."
+
+  run.worker
+  run.worker(success: false)
+  run.read("UPDATE inbox SET next_attempt_at = 0")
+  parked = run.worker(success: false).fetch("status")
+  check(parked == "parked", "order 102 parked")
+  puts "2. Order 101 processed (#{net.call} net). Order 102 failed twice with HTTP 503 and was parked."
+
+  health, code = status.call
+  check(code == 2 && health.fetch("deliveries").fetch("parked") == 1, "status flags parked delivery")
+  puts "3. bin/shopify-status exits #{code}: #{health.fetch("reasons").first}."
+
+  listed = run.json("bin/shopify-deliveries", "list", ALPHA, "--state", "parked").fetch("deliveries").first
+  run.admin.order([ShopifyScenarios.refund], id: ShopifyFixture::OTHER_ORDER)
+  run.json("bin/shopify-deliveries", "retry", ALPHA, listed.fetch("webhook_id"))
+  check(run.worker.fetch("status") == "processed", "retried delivery processed")
+  puts "4. Operator saw #{listed.fetch("webhook_id")} (#{listed.fetch("attempts")} attempts, " \
+       "\"#{listed.fetch("last_error")}\"), fixed the cause and retried it: #{net.call} net."
+
+  run.admin.page([ShopifyFixture::ORDER], next_cursor: "page-2")
+  run.admin.arrange(ALPHA, "ReconcileOrders", "page-2", OUTAGE, code: 503)
+  run.admin.order([ShopifyFixture.transaction("gid://shopify/OrderTransaction/303", "SALE", "40.00")], id: THIRD)
+  run.reconcile(success: false)
+  health, = status.call
+  open_run = health.fetch("reconciliation").fetch("open_run")
+  check(open_run.values_at("status", "pages") == ["failed", 1], "failed run keeps page progress")
+  puts "5. Order 103's webhook was never sent. Reconciliation applied page 1, then page 2 failed; " \
+       "run #{open_run.fetch("id")} is #{open_run.fetch("status")} after #{open_run.fetch("pages")} page."
+
+  before = run.admin.requests.size
+  run.admin.page([THIRD], after: "page-2")
+  run.reconcile
+  resumed = run.admin.requests.drop(before).first.fetch("variables").fetch("after")
+  check(resumed == "page-2", "retry resumed at the saved cursor")
+  health, code = status.call
+  check(code.zero?, "healthy after recovery")
+  puts "6. The retry resumed at #{resumed} instead of page 1: #{net.call} net. bin/shopify-status exits 0."
+
+  audit = run.json("bin/shopify-audit", ALPHA).fetch("transactions")
+  puts "7. bin/shopify-audit traces every transaction to its source:"
+  audit.sort_by { |row| row.fetch("order_id") }.each do |row|
+    puts "   #{row.fetch("order_id").split("/").last} #{row.fetch("kind").ljust(6)} #{row.fetch("currency")} " \
+         "#{row.fetch("amount").rjust(6)}  #{row.fetch("recorded_by")} #{row.fetch("reference")}"
+  end
+  check(audit.map { |row| row.fetch("recorded_by") }.sort == %w[delivery delivery reconciliation], "provenance")
+  check(health.fetch("transactions").fetch("repaired_by_reconciliation") == 1, "status counts repair")
+end

@@ -54,8 +54,16 @@ bundle check
 bin/check
 bin/shopify-check
 bin/shopify-demo
+bin/shopify-ops-demo
 bin/shopify-demo --evidence > shopify-evidence.jsonl
 ```
+
+`bin/shopify-ops-demo` is a deterministic, self-checking walkthrough of the
+operating commands. A poison delivery is parked, flagged by
+`bin/shopify-status` and recovered with `bin/shopify-deliveries retry`. A
+reconciliation run fails on page 2 and then resumes at page 2.
+`bin/shopify-audit` traces each total to the delivery or reconciliation run
+that recorded it.
 
 See the [Shopify verification runs](VERIFICATION.md#shopify-verification) and
 [recorded demo evidence](shopify-evidence.jsonl).

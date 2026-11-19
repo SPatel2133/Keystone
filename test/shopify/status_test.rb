@@ -37,7 +37,7 @@ class ShopifyStatusTest < Minitest::Test
       alpha, = status(run, ALPHA)
       alpha = alpha.fetch(0)
       assert_equal "attention", alpha.fetch("health")
-      assert_equal ["1 parked deliveries need operator review", alpha.fetch("reasons")[1]], alpha.fetch("reasons")
+      assert_equal ["1 parked delivery needs operator review", alpha.fetch("reasons")[1]], alpha.fetch("reasons")
       assert_match(/\Aoldest pending delivery has waited 36\d\ds\z/, alpha.fetch("reasons")[1])
       deliveries = alpha.fetch("deliveries")
       assert_equal [1, 0, 1, 1, 1, 1], deliveries.values_at("pending", "failing", "parked", "processed",

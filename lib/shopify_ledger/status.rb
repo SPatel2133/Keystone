@@ -99,7 +99,8 @@ module ShopifyLedger
 
     def attention(deliveries, reconciliation, totals_error)
       reasons = []
-      reasons << "#{deliveries[:parked]} parked deliveries need operator review" if deliveries[:parked].positive?
+      parked = deliveries[:parked]
+      reasons << "#{parked} parked #{parked == 1 ? 'delivery needs' : 'deliveries need'} operator review" if parked.positive?
       age = deliveries[:oldest_pending_age_seconds]
       reasons << "oldest pending delivery has waited #{age}s" if age && age > PENDING_AGE_LIMIT
       run = reconciliation[:open_run]
