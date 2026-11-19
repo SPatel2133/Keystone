@@ -12,6 +12,18 @@ module ShopifyLedger
       return status(arguments) if command == :status
       return audit(arguments) if command == :audit
       return backup(arguments) if command == :backup
+      if command == :maintain
+        raise ArgumentError, "usage: bin/shopify-maintain" unless arguments.empty?
+
+        require_relative "maintenance"
+        begin
+          puts JSON.generate(Maintenance.run(Config.load))
+        rescue SQLite3::BusyException, SQLite3::LockedException
+          warn "shopify ledger: database is busy; retry maintenance during a quiet period"
+          return 1
+        end
+        return 0
+      end
 
       return reconcile_all if command == :reconcile && arguments == ["--all"]
 
