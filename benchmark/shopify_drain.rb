@@ -19,10 +19,10 @@ if backend == "postgres"
   require_relative "../lib/shopify_ledger/postgres"
   ENV["SHOPIFY_LEDGER_INBOX"] = "postgres"
   base_url = ENV.fetch("SHOPIFY_LEDGER_POSTGRES_URL")
-  schema = "shopify_ledger_scratch_#{Process.pid}"
+  schema = ShopifyLedger::Postgres.scratch_schema_name
   plain = ShopifyLedger::Postgres::Database.new(base_url)
   begin
-    plain.execute("CREATE SCHEMA IF NOT EXISTS #{schema}")
+    plain.execute("CREATE SCHEMA #{schema}")
   ensure
     plain.close
   end

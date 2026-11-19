@@ -54,6 +54,13 @@ class ShopifyPostgresTest < Minitest::Test
                  ShopifyLedger::Postgres.scratch_url("postgres://user:pass@localhost/ledger?sslmode=require", "scratch")
   end
 
+  def test_scratch_schema_names_include_process_and_random_suffix
+    names = Array.new(2) { ShopifyLedger::Postgres.scratch_schema_name }
+
+    assert_equal 2, names.uniq.size
+    names.each { |name| assert_match(/\Ashopify_ledger_scratch_#{Process.pid}_[0-9a-f]{8}\z/, name) }
+  end
+
   def test_postgres_fuzz_uses_a_scratch_schema_without_touching_public_rows
     @db.execute("CREATE TABLE public.keep_me (value TEXT PRIMARY KEY)")
     @db.execute("INSERT INTO public.keep_me VALUES ('keep')")

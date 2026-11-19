@@ -1,4 +1,5 @@
 require "json"
+require "securerandom"
 require "socket"
 require "uri"
 require_relative "admin"
@@ -93,6 +94,10 @@ module ShopifyLedger
       "CREATE UNIQUE INDEX IF NOT EXISTS one_open_run_per_shop ON reconciliation_runs (shop) WHERE status <> 'completed'"
     ].freeze
     TABLES = %w[inbox transactions payment_events checkpoints reconciliation_starts reconciliation_runs].freeze
+
+    def self.scratch_schema_name
+      "shopify_ledger_scratch_#{Process.pid}_#{SecureRandom.hex(4)}"
+    end
 
     def self.scratch_url(url, schema)
       raise ArgumentError, "invalid PostgreSQL schema" unless schema.match?(/\A[a-z_][a-z0-9_]*\z/i)
