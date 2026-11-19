@@ -22,9 +22,15 @@ module ShopifyLedger
       raise Refused, "live database not found" unless File.exist?(@database)
 
       partial = "#{destination}.partial-#{Process.pid}"
-      mode = File.stat(@database).mode & 0o777
-      File.open(partial, File::WRONLY | File::CREAT | File::EXCL, mode) {}
-      File.chmod(mode, partial)
+      source = File.stat(@database)
+      mode = source.mode & 0o777
+      File.open(partial, File::WRONLY | File::CREAT | File::EXCL, 0o600) {}
+      begin
+        File.chown(nil, source.gid, partial)
+        File.chmod(mode, partial)
+      rescue Errno::EPERM
+        File.chmod(mode & 0o700, partial)
+      end
       pages = @storage.connect do |source|
         copy = SQLite3::Database.new(partial)
         begin

@@ -52,6 +52,30 @@ class ShopifyBackupTest < Minitest::Test
     end
   end
 
+  def test_backup_uses_owner_only_permissions_when_source_group_cannot_be_applied
+    ShopifyFixture.run do |run|
+      run.summary
+      File.chmod(0o644, run.database)
+      source_gid = File.stat(run.database).gid
+      backup = ShopifyLedger::Backup.new(config_for(run))
+      destination = File.join(File.dirname(run.database), "private-fallback.sqlite3")
+      chown_arguments = nil
+      temporary_mode = nil
+
+      File.stub(:chown, ->(uid, gid, partial) {
+        chown_arguments = [uid, gid]
+        temporary_mode = File.stat(partial).mode & 0o777
+        raise Errno::EPERM
+      }) do
+        backup.create(destination)
+      end
+
+      assert_equal [nil, source_gid], chown_arguments
+      assert_equal 0o600, temporary_mode
+      assert_equal 0o600, File.stat(destination).mode & 0o777
+    end
+  end
+
   def test_online_backup_under_concurrent_workers_is_a_consistent_snapshot
     ShopifyFixture.run do |run|
       run.with_endpoint do
