@@ -76,4 +76,10 @@ ShopifyFixture.run do |run|
   end
   check(audit.map { |row| row.fetch("recorded_by") }.sort == %w[delivery delivery reconciliation], "provenance")
   check(health.fetch("transactions").fetch("repaired_by_reconciliation") == 1, "status counts repair")
+
+  copy = run.json("bin/shopify-backup", "ledger-backup.sqlite3")
+  check(copy.fetch("integrity") == "ok", "backup integrity")
+  check(copy.fetch("totals").fetch(ALPHA) == run.summary.fetch("totals"), "backup totals match live totals")
+  puts "8. bin/shopify-backup wrote a verified online snapshot (#{copy.fetch("transactions")} transactions, " \
+       "integrity #{copy.fetch("integrity")}) whose totals match the live ledger."
 end
