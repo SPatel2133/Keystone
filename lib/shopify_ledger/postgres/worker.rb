@@ -31,8 +31,9 @@ module ShopifyLedger
           next false unless db.get_first_value("SELECT processed FROM inbox WHERE id = ? FOR UPDATE", [id]) == 0
 
           Payments.apply(db, shop, order_id, entries, source: "delivery:#{webhook_id}")
-          db.execute(<<~SQL, [Time.now.to_i, shop, order_id, fence])
-            UPDATE inbox SET processed = 1, processed_at = ?, last_attempt_at = processed_at, last_error = NULL,
+          now = Time.now.to_i
+          db.execute(<<~SQL, [now, now, shop, order_id, fence])
+            UPDATE inbox SET processed = 1, processed_at = ?, last_attempt_at = ?, last_error = NULL,
                              claimed_by = NULL, claimed_until = NULL
             WHERE shop = ? AND order_id = ? AND processed = 0 AND parked_at IS NULL AND id <= ?
           SQL

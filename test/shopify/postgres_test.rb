@@ -245,4 +245,31 @@ class ShopifyPostgresTest < Minitest::Test
       ENV.delete("SHOPIFY_LEDGER_INBOX")
     end
   end
+
+  # Found in review: two workers completing different deliveries of one order
+  # insert the same payment; the second must see the first, not a unique violation.
+  def test_concurrent_applies_of_the_same_order_do_not_collide
+    entries = ShopifyLedger::Payments.entries(JSON.parse(JSON.generate([ShopifyFixture.transaction(SALE, "SALE", "100.00")])))
+    other = ShopifyLedger::Postgres::Database.new(URL)
+    @db.transaction do
+      ShopifyLedger::Payments.apply(@db, ALPHA, ORDER, entries, source: "delivery:a")
+      waiting = Thread.new { other.transaction { ShopifyLedger::Payments.apply(other, ALPHA, ORDER, entries, source: "delivery:b") } }
+      sleep 0.3
+      assert waiting.alive?, "the second apply waits for the first commit"
+      @waiting = waiting
+    end
+    assert_equal 0, @waiting.value
+    assert_equal [[1, "delivery:a"]], @db.execute("SELECT COUNT(*), MIN(source) FROM transactions")
+  ensure
+    other&.close
+  end
+
+  def test_completed_deliveries_record_their_last_attempt
+    ShopifyFixture.run do |run|
+      arrange_order(run, 1, "10.00")
+      receive("sale", 1)
+      worker(run, "--once")
+      refute_nil @db.get_first_value("SELECT last_attempt_at FROM inbox")
+    end
+  end
 end

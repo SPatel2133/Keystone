@@ -113,12 +113,20 @@ module ShopifyLedger
           next false
         end
 
-        db.execute(<<~SQL, [shop, entry.id, *values, recorded_at, source, *details])
+        inserted = db.execute(<<~SQL, [shop, entry.id, *values, recorded_at, source, *details]).any?
           INSERT INTO transactions (shop, transaction_id, order_id, currency, kind, amount, recorded_at, source,
                                     presentment_currency, presentment_amount, parent_transaction_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (shop, transaction_id) DO NOTHING RETURNING 1
         SQL
-        true
+        next true if inserted
+
+        # On PostgreSQL a concurrent writer can record it first; it must agree.
+        winner = db.get_first_row("SELECT order_id, currency, kind, amount FROM transactions WHERE shop = ? AND transaction_id = ?",
+                                  [shop, entry.id])
+        raise Error, "Previously recorded transaction details conflict" unless winner == values
+
+        false
       end
     end
 
@@ -130,11 +138,15 @@ module ShopifyLedger
         FROM payment_events WHERE shop = ? AND transaction_id = ?
       SQL
       unless stored
-        db.execute(<<~SQL, [shop, entry.id, *facts, entry.status, now, now])
+        inserted = db.execute(<<~SQL, [shop, entry.id, *facts, entry.status, now, now]).any?
           INSERT INTO payment_events (shop, transaction_id, order_id, kind, currency, amount, presentment_currency,
                                       presentment_amount, parent_transaction_id, status, first_seen_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (shop, transaction_id) DO NOTHING RETURNING 1
         SQL
+        # A concurrent writer saw it first; compare against what it stored.
+        return observe(db, shop, order_id, entry, now) unless inserted
+
         return
       end
       raise Error, "Previously seen transaction details conflict" unless stored.first(7) == facts
