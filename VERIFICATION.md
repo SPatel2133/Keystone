@@ -84,6 +84,10 @@ Every delivery was stored exactly once and processed, giving 400 transactions an
 
 `bin/setup` passed from a checkout path with a space and with `RUBYOPT=-w BUNDLE_GEMFILE=/nonexistent` in the caller's environment. Without Ruby on `PATH`, it exited 1 with an install hint.
 
+## Online backup under writers
+
+Five `bin/shopify-backup` copies were taken in sequence while 4 `--drain` workers processed 300 deliveries against a fake Admin API that answers in 10 ms. The copies captured 0, 11, 43, 73 and 105 processed deliveries. Each copy had exactly as many transactions as processed deliveries, and each passed `PRAGMA integrity_check`. `test/shopify/backup_test.rb` repeats this with 3 workers. It also checks that the command refuses to overwrite an existing file, rejects bad usage, and leaves no partial file.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
