@@ -288,8 +288,9 @@ processes keep the route they loaded. Shopify retries webhooks that get no
 ### Randomized crash testing
 
 `bin/shopify-fuzz [--seed N] [--steps N] [--runs N] [--processes]` expands each
-seed into a random sequence of operations, then checks the ledger against a
-reference model of the fake Admin API's ground truth.
+seed into a random sequence of operations over two or three shops, two
+currencies and 1–20 orders. It then checks the ledger against a reference model
+of the fake Admin API's ground truth.
 
 The operations include:
 - new, duplicate and refund deliveries;

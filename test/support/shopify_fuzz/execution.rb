@@ -11,7 +11,7 @@ module ShopifyFuzz
       quiet do
         ShopifyFixture.run do |fixture|
           @fixture = fixture
-          setup(@ops.first.fetch("a"))
+          setup(@ops.first.fetch("a"), @ops.first.fetch("b", 2))
           @ops.drop(1).each_with_index do |op, index|
             @step = "step #{index + 1} #{op["op"]}"
             send("op_#{op["op"]}", op["a"], op["b"], op["c"])
@@ -38,17 +38,19 @@ module ShopifyFuzz
       %w[SHOPIFY_LEDGER_CONFIG SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK].each { |key| ENV[key] = saved_env&.fetch(key, nil) }
     end
 
-    def setup(orders)
+    def setup(orders, shop_count)
+      # Two or three shops; order and transaction IDs repeat across them.
+      @shops = SHOPS.first(shop_count)
       # Shops start in "main" and move between it and "eu".
-      @fixture.configure(max_attempts: 3, api_read_timeout: TIMEOUT, databases: { "main" => File.basename(@fixture.database), "eu" => "eu.sqlite3" })
+      @fixture.configure(shops: @shops, max_attempts: 3, api_read_timeout: TIMEOUT, databases: { "main" => File.basename(@fixture.database), "eu" => "eu.sqlite3" })
       @config_path = File.join(File.dirname(@fixture.database), "config.json")
       ENV["SHOPIFY_LEDGER_CONFIG"] = @config_path
       ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
       @config = ShopifyLedger::Config.load
       @storages = Hash.new { |cache, path| cache[path] = ShopifyLedger::Storage.new(path, busy_timeout: 5000) }
       @clock = Time.now
-      @orders = SHOPS.product((1..orders).to_a).to_h do |shop, number|
-        [[shop, number], { currency: CURRENCIES[(number + SHOPS.index(shop)) % 2], transactions: [], history: [] }]
+      @orders = @shops.product((1..orders).to_a).to_h do |shop, number|
+        [[shop, number], { currency: CURRENCIES[(number + @shops.index(shop)) % 2], transactions: [], history: [] }]
       end
       @truth = {}
       @counters = Hash.new(0)
@@ -57,13 +59,13 @@ module ShopifyFuzz
       @backups = 0
       @dead_pid = Process.spawn("true").tap { |pid| Process.wait(pid) }
       @orders.each_key { |key| arrange_truth(*key) }
-      SHOPS.each { |shop| arrange_pages(shop) }
+      @shops.each { |shop| arrange_pages(shop) }
       @config.all_databases.each { |path| @storages[path].connect { |_db| nil } }
     end
 
     def gid(number) = "gid://shopify/Order/#{number}"
     def pick(list, value) = list.empty? ? nil : list[value % list.size]
-    def order_key(a, b) = [SHOPS[a % SHOPS.size], 1 + (b % (@orders.size / SHOPS.size))]
+    def order_key(a, b) = [@shops[a % @shops.size], 1 + (b % (@orders.size / @shops.size))]
 
     def order_body(shop, number)
       transactions = @orders.fetch([shop, number])[:transactions]
@@ -139,7 +141,7 @@ module ShopifyFuzz
 
     # Moves a shop to the other database, sometimes crashing after the copy or the switch.
     def op_move_shop(a, _b, c)
-      shop = SHOPS[a % SHOPS.size]
+      shop = @shops[a % @shops.size]
       to = route_name(shop) == "eu" ? "main" : "eu"
       seam = [nil, :after_copy, :after_switch][c % 3]
       hooks = seam ? { seam => -> { raise Crash } } : {}
@@ -227,7 +229,7 @@ module ShopifyFuzz
       order = @orders.fetch([shop, number])
       order[:transactions].map! { |existing| existing[:id] == id ? existing.merge(status: "SUCCESS") : existing }
       arrange_truth(shop, number)
-      op_deliver(SHOPS.index(shop), number - 1, (c % 3) + 1) unless (b % 4).zero?
+      op_deliver(@shops.index(shop), number - 1, (c % 3) + 1) unless (b % 4).zero?
     end
 
     def op_advance_time(*)
@@ -257,10 +259,10 @@ module ShopifyFuzz
       false
     end
 
-    def op_reconcile(a, _b, _c) = reconcile(SHOPS[a % SHOPS.size])
+    def op_reconcile(a, _b, _c) = reconcile(@shops[a % @shops.size])
 
     def op_reconcile_failing_page(a, b, _c)
-      shop = SHOPS[a % SHOPS.size]
+      shop = @shops[a % @shops.size]
       arrange_pages(shop, failing: b % pages(shop).size)
       reconcile(shop)
     end
@@ -386,9 +388,9 @@ module ShopifyFuzz
 
     def settle
       @orders.each_key { |key| arrange_truth(*key) }
-      SHOPS.each { |shop| arrange_pages(shop) }
+      @shops.each { |shop| arrange_pages(shop) }
       # Finish any move that crashed: the rerun only cleans up stale copies.
-      SHOPS.each { |shop| ShopifyLedger::MoveShop.run(@config_path, shop, route_name(shop)) }
+      @shops.each { |shop| ShopifyLedger::MoveShop.run(@config_path, shop, route_name(shop)) }
       @config = ShopifyLedger::Config.load
       10.times do
         routed_parked.each { |shop, webhook_id| ShopifyLedger::Deliveries.new(@config).retry(shop, webhook_id) }
@@ -399,7 +401,7 @@ module ShopifyFuzz
         end
         break if each_storage { |db| db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0") }.sum.zero?
       end
-      SHOPS.each do |shop|
+      @shops.each do |shop|
         fail!("settle reconciliation failed for #{shop}") unless reconcile(shop)
       end
       @config.all_databases.each { |path| check_invariants(path) }
@@ -410,7 +412,7 @@ module ShopifyFuzz
           stale = db.execute("SELECT shop, transaction_id, status FROM payment_events")
                     .reject { |shop, id, status| @truth.fetch([shop, id])[:status] == status }
           fail!("statuses still lag after settle: #{stale.first(3).inspect}") unless stale.empty?
-          SHOPS.each do |shop|
+          @shops.each do |shop|
             stored = db.execute("SELECT transaction_id FROM transactions WHERE shop = ?", [shop]).flatten.to_set
             unless @config.database_for(shop) == path
               fail!("#{shop} still has rows in #{File.basename(path)} after its move") unless stored.empty?

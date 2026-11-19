@@ -6,7 +6,7 @@ module ShopifyFuzz
 
     private
 
-    def setup(orders)
+    def setup(orders, shop_count)
       super
       require_relative "../../../lib/shopify_ledger/postgres"
       @pg&.close
@@ -86,14 +86,14 @@ module ShopifyFuzz
 
     def settle
       @orders.each_key { |key| arrange_truth(*key) }
-      SHOPS.each { |shop| arrange_pages(shop) }
+      @shops.each { |shop| arrange_pages(shop) }
       10.times do
         @pg.execute("UPDATE inbox SET parked_at = NULL, attempts = 0 WHERE parked_at IS NOT NULL")
         op_advance_time
         pg_worker("settle-machine").drain
         break if @pg.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0").zero?
       end
-      SHOPS.each { |shop| fail!("settle reconciliation failed for #{shop}") unless reconcile(shop) }
+      @shops.each { |shop| fail!("settle reconciliation failed for #{shop}") unless reconcile(shop) }
       check_invariants(@config.database)
       pending = @pg.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0")
       fail!("#{pending} deliveries never completed") unless pending.zero?
@@ -103,7 +103,7 @@ module ShopifyFuzz
       stored = @pg.execute("SELECT shop, transaction_id FROM transactions").to_set
       expected = @truth.keys.select { |shop, id| expected_row(shop, id) }.to_set
       fail!("missing after settle: #{(expected - stored).to_a.first(3).inspect}") unless (expected - stored).empty?
-      SHOPS.each do |shop|
+      @shops.each do |shop|
         fail!("totals for #{shop} differ from the model") unless ShopifyLedger::Payments.summary(@pg, shop) == model_totals(shop)
       end
     ensure

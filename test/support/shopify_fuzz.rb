@@ -19,7 +19,6 @@ module ShopifyFuzz
   class Failure < StandardError; end
   class Crash < StandardError; end
 
-  SHOPS = [ALPHA, BETA].freeze
   CURRENCIES = %w[CAD USD].freeze
   PAGE_SIZE = 3
   # The fake Admin API answers a "timeout" fault after this, past the client's read timeout.
@@ -36,7 +35,7 @@ module ShopifyFuzz
     random = Random.new(seed)
     weights = processes ? WEIGHTS.merge(PROCESS_WEIGHTS) : WEIGHTS
     bag = weights.flat_map { |op, weight| [op] * weight }
-    [{ "op" => "setup", "a" => 1 + random.rand(20) }] +
+    [{ "op" => "setup", "a" => 1 + random.rand(20), "b" => 2 + random.rand(2) }] +
       Array.new(steps) { { "op" => bag[random.rand(bag.size)], "a" => random.rand(2**30), "b" => random.rand(2**30), "c" => random.rand(2**30) } }
   end
 
