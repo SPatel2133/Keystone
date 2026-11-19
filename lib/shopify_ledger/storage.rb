@@ -68,6 +68,8 @@ module ShopifyLedger
       SQL
       "CREATE UNIQUE INDEX one_open_run_per_shop ON reconciliation_runs (shop) WHERE status <> 'completed'",
       "CREATE INDEX inbox_by_shop ON inbox (shop, processed, parked_at)",
+    # Worker selection must not scan parked or processed history.
+    "CREATE INDEX inbox_eligible ON inbox (id, next_attempt_at) WHERE processed = 0 AND parked_at IS NULL",
       "CREATE INDEX transactions_by_shop_order ON transactions (shop, order_id)"
     ].freeze
     # Each step upgrades the catalog left by the previous one. A new database

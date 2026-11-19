@@ -33,7 +33,7 @@ module ShopifyLedger
     def next_delivery
       @storage.connect do |db|
         db.get_first_row(<<~SQL, [Time.now.to_i])
-          SELECT id, shop, order_id, attempts, webhook_id FROM inbox
+          SELECT id, shop, order_id, attempts, webhook_id FROM inbox INDEXED BY inbox_eligible
           WHERE processed = 0 AND parked_at IS NULL AND next_attempt_at <= ?
           ORDER BY id LIMIT 1
         SQL
