@@ -35,7 +35,7 @@ route, then clean up.
 | Every stored transaction equals Shopify's ground truth | `payment_domain_test`, `isolation_regression_test` | fuzzer, after every step |
 | After settle, the stored set and totals equal the model exactly | `operations_edge_test` | fuzzer settle phase |
 | No delivery is both processed and parked; no claim points at a live non-worker | `drain_test`, `operations_race_test` | fuzzer, after every step |
-| Reconciliation checkpoints never move backwards | `resumable_reconciliation_test` | fuzzer, after every step |
+| Reconciliation checkpoints never move backwards | `resumable_reconciliation_test`, `ledger_test`, `operations_race_test` | fuzzer, after every step |
 | A stored status never contradicts Shopify's | `payment_domain_test` | fuzzer, after every step |
 | A moved shop leaves no rows outside its routed database | `shop_routing_test` | fuzzer settle phase (`move_shop`) |
 
