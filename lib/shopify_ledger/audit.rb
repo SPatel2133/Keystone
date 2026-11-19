@@ -34,11 +34,17 @@ module ShopifyLedger
         SELECT #{COLUMNS} FROM transactions WHERE shop = ?
         ORDER BY recorded_at IS NOT NULL, recorded_at, order_id, transaction_id LIMIT ?
       SQL
+      # A corrupt row must not hide the evidence an operator needs to find it.
+      totals, totals_error = begin
+        [Payments.summary(db, shop), nil]
+      rescue Payments::Error => error
+        [nil, error.message]
+      end
       {
-        shop: shop, totals: Payments.summary(db, shop),
+        shop: shop, totals: totals, totals_error: totals_error,
         transaction_count: db.get_first_value("SELECT COUNT(*) FROM transactions WHERE shop = ?", [shop]),
         truncated: rows.size > limit, transactions: rows.first(limit).map { |row| describe(row) }
-      }
+      }.compact
     end
 
     def order(db, shop, order_id)
@@ -50,15 +56,17 @@ module ShopifyLedger
         SELECT webhook_id, topic, processed, parked_at, attempts, requeues, received_at, processed_at, last_error
         FROM inbox WHERE shop = ? AND order_id = ? ORDER BY id
       SQL
+      invalid = rows.any? { |row| !Payments::CURRENCIES.include?(row[3]) }
       {
-        shop: shop, order_id: order_id, totals: totals(rows),
+        shop: shop, order_id: order_id, totals: invalid ? nil : totals(rows),
+        totals_error: invalid ? "Stored payment has invalid currency; reconcile its order" : nil,
         transactions: rows.map { |row| describe(row) },
         deliveries: deliveries.map do |webhook_id, topic, processed, parked_at, attempts, requeues, received, done, error|
           state = if processed == 1 then "processed" elsif parked_at then "parked" elsif attempts.positive? then "failing" else "pending" end
           { webhook_id: webhook_id, topic: topic, state: state, attempts: attempts, requeues: requeues,
             received_at: iso(received), processed_at: iso(done), last_error: error }
         end
-      }
+      }.compact
     end
 
     def totals(rows)
