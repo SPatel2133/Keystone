@@ -96,6 +96,19 @@ Five `bin/shopify-backup` copies were taken in sequence while 4 `--drain` worker
 
 `test_one_fetch_completes_earlier_deliveries_for_the_order_but_not_later_ones` sends three deliveries for one order and injects a fourth while the first fetch is in flight. The result was 2 Admin fetches, all 4 deliveries processed, and the exact final totals. The existing `test_duplicate_reversed_deliveries_and_shop_currency_isolation` now expects 2 fetches for 4 deliveries across two shops, down from 4. Cross-shop deliveries are never coalesced.
 
+### Coalescing under a burst
+
+`ruby benchmark/shopify_drain.rb 100 50 3` sends 100 orders × 3 interleaved updates (300 deliveries) with 50 ms of fake Admin latency. The "before" row ran the worker from `2bc8976`, before coalescing.
+
+| Workers | Admin fetches before → after | Seconds before → after | Deliveries/s before → after |
+| --- | --- | --- | --- |
+| 1 | 300 → 100 | 17.23 → 5.96 | 17.4 → 50.3 |
+| 2 | 300 → 101 | 8.70 → 3.14 | 34.5 → 95.5 |
+| 4 | 300 → 103 | 4.64 → 1.69 | 64.6 → 177.5 |
+| 8 | 300 → 106 | 2.35 → 1.13 | 127.7 → 266.1 |
+
+All runs completed 300 of 300 deliveries with net CAD 100.00. With several workers, a few fetches are wasted. Claims are per delivery, so two workers can fetch the same order at once. The second worker's recheck then finds its delivery already completed and discards the result. These extra fetches cost no correctness.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
