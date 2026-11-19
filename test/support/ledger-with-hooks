@@ -1,0 +1,8 @@
+#!/usr/bin/env ruby
+require_relative "../../lib/event_consumer/cli"
+
+kill_self = -> { Process.kill("KILL", Process.pid) }
+exit EventConsumer::CLI.run(hooks: {
+  "before_commit" => kill_self,
+  "after_commit_before_ack" => kill_self
+})

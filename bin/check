@@ -1,0 +1,5 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require "minitest/autorun"
+
+Dir[File.expand_path("../test/*_test.rb", __dir__)].sort.each { |test| require test }

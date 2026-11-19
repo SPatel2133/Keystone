@@ -1,0 +1,59 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require_relative "../test/support/scenarios"
+require "digest"
+
+def metadata
+  root = LedgerProcess::ROOT
+  paths = Dir.chdir(root) { Dir.glob(["Gemfile*", "bin/*", "lib/**/*.rb", "test/**/*"]).select { |path| File.file?(path) }.sort }
+  digest = Digest::SHA256.new
+  paths.each do |path|
+    digest.update(path + "\0")
+    digest.update(File.size(File.join(root, path)).to_s + "\0")
+    digest.update(File.binread(File.join(root, path)))
+  end
+  sqlite_version = nil
+  SQLite3::Database.new(":memory:") { |db| sqlite_version = db.get_first_value("SELECT sqlite_version()") }
+  {
+    "type" => "metadata",
+    "ruby" => RUBY_DESCRIPTION,
+    "bundler" => Bundler::VERSION,
+    "sqlite3_gem" => SQLite3::VERSION,
+    "minitest" => Gem.loaded_specs.fetch("minitest").version.to_s,
+    "sqlite" => sqlite_version,
+    "source_sha256" => digest.hexdigest
+  }
+end
+
+def narrate(order, crashes)
+  puts "Deliver 1:+5, 3:+2, 2:-1 to a fresh ledger"
+  order.fetch("steps").each do |step|
+    puts "  #{step.fetch("seq")}, delta #{step.fetch("delta")} -> #{JSON.generate(step.fetch("observed"))}"
+  end
+  puts "  Oracle and ledger balance: #{order.fetch("ledger").fetch("balance")}"
+  puts "  Naive last-seen balance: #{order.fetch("naive_observed").fetch("balance")}"
+  puts
+  crashes.each do |record|
+    observed = record.fetch("observed")
+    child = observed.fetch("child")
+    puts "Kill #{record.fetch("seam")} on a separately seeded ledger"
+    puts "  Signal #{child.fetch("signal")}, #{child.fetch("stdout_bytes").size} stdout bytes"
+    puts "  SQLite before retry: #{JSON.generate(observed.fetch("before_retry"))}"
+    puts "  Retry 2:-1 -> #{JSON.generate(observed.fetch("retry"))}"
+  end
+  puts
+  puts "Try to change event 3 to +9 -> #{JSON.generate(crashes.last.fetch("observed").fetch("conflict"))}"
+end
+
+abort "Usage: bin/demo [--evidence]" unless ARGV.empty? || ARGV == ["--evidence"]
+
+ordering = Scenarios.ordering
+crashes = CrashHarness::SEAMS.map { |seam| Scenarios.crash(seam) }
+if ARGV.empty?
+  narrate(ordering, crashes)
+else
+  probes = CrashHarness::SEAMS.map { |seam| CrashHarness.probe(seam) }
+  probes.each { |probe| Scenarios.verify!(probe.fetch("expected"), probe.fetch("observed"), probe.fetch("seam")) }
+  contention = %w[write read].map { |reservation| Scenarios.contention(reservation) }
+  [metadata, ordering, *probes, *crashes, *contention].each { |record| puts JSON.generate(record) }
+end
