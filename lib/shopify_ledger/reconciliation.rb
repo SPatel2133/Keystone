@@ -31,6 +31,23 @@ module ShopifyLedger
     # Returns the shop's checkpoint after finishing any interrupted window and
     # then one fresh window ending now.
     def run(shop)
+      return run_with_storage(shop) if @store || !@config.path
+
+      config_path = @config.path
+      mode = File.stat(config_path).mode & 0o7777
+      lock_path = "#{config_path}.lock"
+      File.open(lock_path, File::RDWR | File::CREAT, mode) do |lock|
+        File.chmod(mode, lock_path)
+        lock.flock(File::LOCK_SH)
+        @config = Config.read(config_path)
+        @storage = Storage::Store.new(@config.database_for(shop))
+        run_with_storage(shop)
+      end
+    end
+
+    private
+
+    def run_with_storage(shop)
       @storage = @store || Storage::Store.new(@config.database_for(shop))
       admin = Admin.new(@config, shop)
       loop do
@@ -42,8 +59,6 @@ module ShopifyLedger
         return checkpoint unless run.resumed
       end
     end
-
-    private
 
     def open_run(shop)
       upper = @clock.call.getutc
