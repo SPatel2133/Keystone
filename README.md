@@ -190,6 +190,38 @@ bin/shopify-audit example.myshopify.com --order gid://shopify/Order/101
   on stderr, for example `{"event":"delivery_parked","shop":...,"delivery":...,"attempt":12,"error":...}`.
   Logs carry identifiers and outcomes only, never tokens or webhook bodies.
 
+### Randomized crash testing
+
+`bin/shopify-fuzz [--seed N] [--steps N] [--runs N] [--processes]` expands each
+seed into a random sequence of operations, then checks the ledger against a
+reference model of the fake Admin API's ground truth.
+
+The operations include:
+- new, duplicate and refund deliveries;
+- workers that crash before or after commit, and claims left by dead workers;
+- Admin API faults: 429, 500, 503 and `THROTTLED`;
+- order changes, with or without a webhook;
+- operator retries, backups and maintenance;
+- reconciliation runs whose pages fail.
+
+`--processes` adds real `--drain` processes running concurrently, and workers
+SIGKILLed mid-fetch.
+
+After every step it checks that:
+1. No `(shop, transaction_id)` is stored twice.
+2. Every stored transaction matches the ground truth for shop, order, currency, kind and amount.
+3. No delivery is both processed and parked, and no claim belongs to a live non-worker process.
+4. Reconciliation checkpoints never move backwards.
+
+A final settle phase clears faults, retries parked deliveries, drains, and
+reconciles every shop. The stored set must then equal the ground truth, and the
+per-currency totals must match the model as exact strings.
+
+On a failure, the run is shrunk by dropping operations one at a time and
+written to `tmp/fuzz-failure-SEED.json`. `bin/shopify-fuzz --replay FILE`
+replays it. `bin/shopify-check` runs fixed seeds: 25 runs × 200 steps in
+process and 3 runs × 60 steps with processes.
+
 ### Storage and recovery
 
 - Verify the Shopify signature over the raw body before JSON parsing. Store only shop, delivery ID, topic, and order ID plus processing metadata. Return HTTP 200 after committing a new delivery or confirming a matching retry. Reusing the same shop and delivery ID for a different order or topic returns HTTP 409. The first delivery remains available to the worker.
