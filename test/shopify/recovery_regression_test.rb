@@ -98,15 +98,16 @@ class ShopifyRecoveryRegressionTest < Minitest::Test
       storage = ShopifyLedger::Storage.new(config.database)
       ShopifyLedger::Admin.stub(:new, admin) do
         first = ShopifyLedger::Reconciliation.new(config, clock: -> { start })
-        assert_raises(ShopifyLedger::Admin::Error) { first.run(SHOP) }
+        capture_io { assert_raises(ShopifyLedger::Admin::Error) { first.run(SHOP) } }
         assert_empty storage.connect { |db| db.execute("SELECT * FROM checkpoints") }
 
         later = start + 60
         restarted = ShopifyLedger::Reconciliation.new(config, clock: -> { later })
-        assert_equal later.iso8601, restarted.run(SHOP)
+        capture_io { assert_equal later.iso8601, restarted.run(SHOP) }
       end
       assert_equal [["REFUND", "25.00"]], storage.connect { |db| db.execute("SELECT kind, amount FROM transactions") }
-      assert_equal filters.first.split.first, filters.last.split.first
+      # The retry resumes the failed first window at page two instead of a fresh window.
+      assert_equal filters.first, filters[2]
     end
   end
 end

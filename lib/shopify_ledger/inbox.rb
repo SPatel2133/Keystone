@@ -13,8 +13,8 @@ module ShopifyLedger
       @storage.connect do |db|
         notify_insert = -> { after_commit.call if inserted && after_commit }
         Storage.transaction(db, after_commit: notify_insert) do
-          db.execute(<<~SQL, [shop, webhook_id, topic, order_id])
-            INSERT INTO inbox (shop, webhook_id, topic, order_id) VALUES (?, ?, ?, ?)
+          db.execute(<<~SQL, [shop, webhook_id, topic, order_id, Time.now.to_i])
+            INSERT INTO inbox (shop, webhook_id, topic, order_id, received_at) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (shop, webhook_id) DO NOTHING
           SQL
           inserted = db.changes == 1

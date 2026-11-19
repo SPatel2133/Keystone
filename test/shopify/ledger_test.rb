@@ -65,8 +65,11 @@ class ShopifyLedgerTest < Minitest::Test
 
       assert_empty run.admin.requests
       assert_equal 4, run.snapshot.fetch("inbox").length
-      4.times { assert_equal({ "status" => "processed" }, run.worker) }
+      # One fetch per shop answers all three ALPHA deliveries for the order.
+      2.times { assert_equal({ "status" => "processed" }, run.worker) }
       assert_equal({ "status" => "idle" }, run.worker)
+      assert_equal 2, run.admin.requests.size
+      assert_equal [[4]], run.read("SELECT SUM(processed) FROM inbox")
       expected = {
         "shop" => ALPHA,
         "totals" => ShopifyScenarios::AFTER.fetch("totals") +

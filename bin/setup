@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Prepares a fresh clone: checks the Ruby in .ruby-version, installs the locked
+# gems and runs a disposable end-to-end smoke check. Safe to rerun.
+set -euo pipefail
+project="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$project"
+unset BUNDLE_GEMFILE RUBYOPT
+export BUNDLE_GEMFILE="$project/Gemfile"
+
+wanted="$(tr -d '[:space:]' < .ruby-version)"
+if ! command -v ruby > /dev/null; then
+  echo "setup: Ruby $wanted is required (for example: mise install ruby@$wanted)" >&2
+  exit 1
+fi
+actual="$(ruby -e 'print RUBY_VERSION')"
+if [ "$actual" != "$wanted" ]; then
+  echo "setup: Ruby $wanted is required, found $actual" >&2
+  exit 1
+fi
+
+bundle check > /dev/null 2>&1 || bundle install
+echo "setup: Ruby $actual, $(bundle exec ruby -e 'require "sqlite3"; print "SQLite #{SQLite3::SQLITE_VERSION}"')"
+
+scratch="$(mktemp -d)"
+trap 'rm -rf -- "$scratch"' EXIT
+(cd "$scratch" && "$project/bin/shopify-ops-demo" > /dev/null 2>&1) || {
+  echo "setup: smoke check failed; run bin/shopify-ops-demo for details" >&2
+  exit 1
+}
+echo "setup: ready. Next: bin/check, bin/shopify-check, bin/shopify-ops-demo"

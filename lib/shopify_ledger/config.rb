@@ -7,7 +7,11 @@ module ShopifyLedger
     API_PATH = "/admin/api/#{API_VERSION}/graphql.json".freeze
     SHOP = /\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.myshopify\.com\z/
 
-    attr_reader :database, :secret
+    DEFAULT_MAX_ATTEMPTS = 12
+
+    DEFAULT_API_ATTEMPTS = 3
+
+    attr_reader :database, :secret, :max_attempts, :api_attempts
 
     def self.load
       path = File.expand_path(ENV.fetch("SHOPIFY_LEDGER_CONFIG"))
@@ -21,6 +25,14 @@ module ShopifyLedger
 
       @database = File.expand_path(required_string(data, "database"), directory).freeze
       @secret = required_string(data, "secret").freeze
+      @max_attempts = data.fetch("max_attempts", DEFAULT_MAX_ATTEMPTS)
+      unless @max_attempts.is_a?(Integer) && @max_attempts.between?(1, 1000)
+        raise ArgumentError, "max_attempts must be an integer from 1 to 1000"
+      end
+      @api_attempts = data.fetch("api_attempts", DEFAULT_API_ATTEMPTS)
+      unless @api_attempts.is_a?(Integer) && @api_attempts.between?(1, 10)
+        raise ArgumentError, "api_attempts must be an integer from 1 to 10"
+      end
       shops = data["shops"]
       raise ArgumentError, "configure at least one shop" unless shops.is_a?(Hash) && !shops.empty?
 
@@ -34,6 +46,10 @@ module ShopifyLedger
         validate_endpoint(endpoint, shop)
         routes[shop] = { "endpoint" => endpoint.freeze, "token" => token.freeze }.freeze
       end.freeze
+    end
+
+    def shops
+      @shops.keys
     end
 
     def shop?(shop)

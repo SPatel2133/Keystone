@@ -111,13 +111,19 @@ module ShopifyFixture
       @admin = admin
       @database = File.join(directory, "shopify.sqlite3")
       config_path = File.join(directory, "config.json")
-      shops = [ALPHA, BETA].each_with_object({}) do |shop, configs|
-        configs[shop] = { endpoint: admin.endpoint, token: "fake-token-for-#{shop}" }
-      end
-      File.write(config_path, JSON.generate(database: database, secret: SECRET, shops: shops))
+      @config_path = config_path
+      configure
       @environment = CrashHarness::CLEAN_ENV.merge("SHOPIFY_LEDGER_CONFIG" => config_path,
                                                     "SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK" => "1",
                                                     "SHOPIFY_LEDGER_PORT" => "0")
+    end
+
+    def configure(**settings)
+      shops = [ALPHA, BETA].each_with_object({}) do |shop, configs|
+        configs[shop] = { endpoint: admin.endpoint, token: "fake-token-for-#{shop}" }
+      end
+      # Most scenarios count exact Admin requests, so in-request retries are opt-in.
+      File.write(@config_path, JSON.generate(database: database, secret: SECRET, shops: shops, api_attempts: 1, **settings))
     end
 
     def with_endpoint(seam: nil)
@@ -178,6 +184,11 @@ module ShopifyFixture
                      *args, chdir: @directory)
     end
 
+    def spawn(relative, *args)
+      executable = File.join(ROOT, relative)
+      Open3.popen3(@environment, [executable, executable], *args, chdir: @directory)
+    end
+
     def json(relative, *args, success: true)
       stdout, stderr, status = command(relative, *args)
       unless success == status.success? && status.exited?
@@ -208,7 +219,11 @@ module ShopifyFixture
 
     def read(sql, parameters = [])
       rows = nil
-      SQLite3::Database.new(database) { |connection| rows = connection.execute(sql, parameters) }
+      SQLite3::Database.new(database) do |connection|
+        # Tests poll while workers write; wait for the lock like a real reader would.
+        connection.busy_timeout(2000)
+        rows = connection.execute(sql, parameters)
+      end
       rows
     end
 

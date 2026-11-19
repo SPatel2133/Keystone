@@ -1,3 +1,118 @@
+# Shopify operations verification on Linux
+
+Branch `devin/1795078530-shopify-operations`, based on `66ab683`. The machine was Linux x86_64 (8 vCPU Intel Xeon, kernel 6.8, 32 GiB) running Ruby 3.4.13, Bundler 4.1.0, SQLite 3.54.1 and the sqlite3 2.10.2 gem. Every database was disposable. The Shopify Admin API was the local synthetic GraphQL server, and no credentials or merchant data were used.
+
+## Baseline before changes
+
+`bin/check` passed 29 tests / 483 assertions, and `bin/shopify-check` passed 20 tests / 153 assertions. The demos and `test/whiteboard` exited 0.
+
+## Final integrated run
+
+The block in "Reproduce the integrated run" ran from a scratch directory whose path contained a space. The project was reached through a symlink with a space in its path. `BUNDLE_GEMFILE` and `RUBYOPT` were unset, and the bundle was frozen in an empty `BUNDLE_PATH`. `bin/shopify-ops-demo` and five repeats of the new operations, resumable-reconciliation and race tests were added to the run.
+
+- `bin/check` passed **29 / 483**, and `bin/shopify-check` passed **37 / 378**. There were zero failures, errors or skips.
+- Contention ran five times at 1 / 8 each. Maintenance passed 4 / 38. Seeds 1–10 passed 1 / 430. The Shopify operations, resume and race subset passed five times at 7 / 80 each.
+- `bin/demo`, `bin/inventory-demo`, `bin/shopify-demo`, `bin/shopify-ops-demo`, `test/whiteboard`, both evidence commands and both benchmark modes exited 0. The caller ledger seeded with `1:+99` kept the same SHA-256.
+- `bin/benchmark --full` on this machine ran 100,000 ordered events at 917 ack/s (p50 0.96 ms, p95 1.59 ms) and 100,000 identical retries at 6,516 ack/s (p50 0.13 ms). It closed a 10,000-event gap in 80 ms. Through the CLI with interpreter startup, p50 was 189 ms. Storage was 8.89 bytes per event. `benchmark/results.json` is still the macOS sample cited in the README.
+- Hosted CI (`verify.yml`, Ubuntu 22.04) passed on PR #1. The workflow now also runs `bin/shopify-ops-demo`.
+
+## Crash, retry and concurrency outcomes
+
+- **Killed reconciliation.** A child reconciler was sent SIGKILL while it waited on page 2. The run stayed `running` with page 1 and its cursor durable. The next `bin/reconcile` resumed at that cursor, finished the window, then ran a fresh window. Totals were exact, and no transaction was duplicated.
+- **Expired cursor.** When the first request with a saved cursor failed, the cursor was cleared and the next attempt rescanned from page one. Replayed pages were idempotent.
+- **Concurrent reconcilers.** A second process ran to completion while the first was blocked mid-fetch. It resumed the same open run, then scanned a fresh window. The first process then finished without moving the checkpoint backwards. Both runs ended `completed` with two transactions.
+- **Operator retry racing a worker.** An operator requeue happened during a failing Admin fetch. The worker's attempt-count guard discarded its stale failure update, so the delivery was neither parked nor double-counted (attempts 1, requeues 1).
+- **Poison delivery.** After `max_attempts` the delivery was parked, and deliveries for other orders were still processed. Processed deliveries refuse `retry`.
+- **Admin retries.** HTTP 429/5xx, `THROTTLED` and connection failures were retried within `api_attempts`, with `Retry-After` capped at 2 s. Permanent 4xx, malformed JSON and other GraphQL errors made exactly one request.
+- **Migrations.** Legacy databases from each known version upgraded in one transaction. A forced failure on the final statement rolled back to the prior version, and the next open completed the upgrade. Pre-upgrade transactions report provenance `unknown`.
+
+## Measured boundary: parked history
+
+`ruby benchmark/shopify_operations.rb 50000` filled one shop's inbox with 50,000 parked rows, 50,000 processed rows and 1 eligible delivery.
+
+| Query | Plan | Mean |
+| --- | --- | --- |
+| Worker selection with `inbox_eligible` partial index | index scan of unfinished, unparked rows | 0.02 ms |
+| Same query through the older `inbox_ready` index | range search plus temporary B-tree sort | 5.9 ms |
+| Full `bin/shopify-status` report for the shop | | 37 ms |
+
+Without the partial index, worker selection cost grew with parked history. That finding is why the worker names `INDEXED BY inbox_eligible`: SQLite's planner chose `inbox_ready` without statistics.
+
+## Concurrent workers
+
+`bin/shopify-worker --drain` was run by 1, 2, 4 and 8 processes over 200 deliveries for 200 orders.
+
+- **Before claims (found defect).** With an instant fake Admin API, totals were exact, but Admin fetches were 200, 314, 456 and 614. Workers raced on the same oldest row, and the loser's fetch was discarded. Wall time stayed about 0.8–1.1 s, so the extra workers gained nothing.
+- **Before raising the worker's busy timeout (found defect).** Once claims added a write per selection, 4 and 8 workers sometimes hit `SQLite3::BusyException` at the 250 ms timeout. One worker stopped with `storage_error`, or a delivery was deferred 2 s after a wasted fetch. Raising the worker's timeout to 5 s fixed it. Three repeated runs at each worker count then succeeded with 200 fetches and net CAD 200.00.
+- **After.** `ruby benchmark/shopify_drain.rb 200 50` uses a fake Admin API that answers in 50 ms.
+
+| Workers | Admin fetches | Seconds | Deliveries/s |
+| --- | --- | --- | --- |
+| 1 | 200 | 11.14 | 17.9 |
+| 2 | 200 | 5.61 | 35.6 |
+| 4 | 200 | 2.92 | 68.5 |
+| 8 | 200 | 1.63 | 122.8 |
+
+`test/shopify/drain_test.rb` checks the following:
+- Four concurrent drains over 40 deliveries apply each delivery once with exactly 40 fetches, and no claim is left over.
+- A worker started mid-fetch finds nothing to claim.
+- `--limit` and the exit codes behave as documented.
+- The existing worker kill tests at both seams still recover immediately, because a dead claimant's claim is taken over.
+
+## Webhook ingest under contention
+
+`ruby benchmark/shopify_ingest.rb 400 8 W` sends 400 signed webhooks from 8 threads. A sender retries any non-200 response, as Shopify does. Meanwhile W `--drain` loops run against the same file.
+
+| Drain workers | 200 | 503 `storage_busy` | Ack/s | p50 ms | p95 ms | Max ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 400 | 7 | 152.4 | 15.2 | 23.0 | 1,787 |
+| 4 | 400 | 6 | 109.1 | 28.4 | 118.2 | 1,535 |
+
+Every delivery was stored exactly once and processed, giving 400 transactions and net CAD 400.00. About 1.5–1.75% of attempts hit the webhook's 250 ms lock wait and got a retryable 503. That happened even with no workers running, so the senders were contending with each other under FULL synchronous commits. The slowest acknowledgment stayed well under Shopify's 5 s delivery timeout. A higher webhook ingest rate would need WAL mode or a server database. WAL was not adopted here because the documented durability and benchmark settings assume rollback-journal mode.
+
+## Edge cases, fleet commands and setup
+
+`test/shopify/operations_edge_test.rb` covers four edge cases:
+- **Large and fractional amounts:** a 20-digit CAD sale, and BHD amounts with three and six decimal places, gave identical exact totals in summary, status and both audit modes.
+- **Cross-shop isolation:** the delivery ID `shared` was reused by two shops. Listing, retry refusal, status, audit and parking each stayed within their shop.
+- **Repeated page cursor:** a page whose next cursor repeats the current one fails the run, and the run is not saved past the last good page. It resumes once the API is fixed.
+- **Corrupt currency:** a row with an invalid currency no longer makes `bin/shopify-audit` exit 1. The audit lists the row and reports `totals_error` (found defect).
+
+`test/shopify/fleet_test.rb` checks two commands:
+- `bin/reconcile --all` exits 1 when one shop's API returns HTTP 500. It still completes the healthy shop.
+- `bin/shopify-status --prometheus` emits integer samples only, includes no money, and filters by shop.
+
+`bin/setup` passed from a checkout path with a space and with `RUBYOPT=-w BUNDLE_GEMFILE=/nonexistent` in the caller's environment. Without Ruby on `PATH`, it exited 1 with an install hint.
+
+## Online backup under writers
+
+Five `bin/shopify-backup` copies were taken in sequence while 4 `--drain` workers processed 300 deliveries against a fake Admin API that answers in 10 ms. The copies captured 0, 11, 43, 73 and 105 processed deliveries. Each copy had exactly as many transactions as processed deliveries, and each passed `PRAGMA integrity_check`. `test/shopify/backup_test.rb` repeats this with 3 workers. It also checks that the command refuses to overwrite an existing file, rejects bad usage, and leaves no partial file.
+
+## Long-running worker
+
+`bin/shopify-worker --watch` processed a delivery that arrived after it started. On SIGTERM it exited 0 with `{"processed":1,"retry":0,"parked":0,"status":"stopped"}`. The test is `test_watch_processes_new_deliveries_and_stops_cleanly_on_sigterm`. Final local counts at this point: `bin/check` 29 / 483 and `bin/shopify-check` 50 / 620, with no failures, errors or skips.
+
+## Same-order coalescing
+
+`test_one_fetch_completes_earlier_deliveries_for_the_order_but_not_later_ones` sends three deliveries for one order and injects a fourth while the first fetch is in flight. The result was 2 Admin fetches, all 4 deliveries processed, and the exact final totals. The existing `test_duplicate_reversed_deliveries_and_shop_currency_isolation` now expects 2 fetches for 4 deliveries across two shops, down from 4. Cross-shop deliveries are never coalesced.
+
+### Coalescing under a burst
+
+`ruby benchmark/shopify_drain.rb 100 50 3` sends 100 orders × 3 interleaved updates (300 deliveries) with 50 ms of fake Admin latency. The "before" row ran the worker from `2bc8976`, before coalescing.
+
+| Workers | Admin fetches before → after | Seconds before → after | Deliveries/s before → after |
+| --- | --- | --- | --- |
+| 1 | 300 → 100 | 17.23 → 5.96 | 17.4 → 50.3 |
+| 2 | 300 → 101 | 8.70 → 3.14 | 34.5 → 95.5 |
+| 4 | 300 → 103 | 4.64 → 1.69 | 64.6 → 177.5 |
+| 8 | 300 → 106 | 2.35 → 1.13 | 127.7 → 266.1 |
+
+All runs completed 300 of 300 deliveries with net CAD 100.00. With several workers, a few fetches are wasted. Claims are per delivery, so two workers can fetch the same order at once. The second worker's recheck then finds its delivery already completed and discards the result. These extra fetches cost no correctness.
+
+## Not run
+
+PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
+
 # Local verification on Ruby 3.4
 
 The baseline was GitHub commit `b648d7c`. The project directory initially belonged to an unrelated, uncommitted parent workspace. Its files matched a fresh clone of the published project. The project now has its own checkout and forward-only local branch, `codex/recovery-verification`. The published runtime migration already pinned Ruby 3.4.13 and supplied a lockfile for macOS ARM and Linux x86-64 GNU.

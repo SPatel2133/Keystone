@@ -54,8 +54,17 @@ bundle check
 bin/check
 bin/shopify-check
 bin/shopify-demo
+bin/shopify-ops-demo
 bin/shopify-demo --evidence > shopify-evidence.jsonl
 ```
+
+`bin/shopify-ops-demo` is a deterministic, self-checking walkthrough of the
+operating commands. A poison delivery is parked, flagged by
+`bin/shopify-status` and recovered with `bin/shopify-deliveries retry`. A
+reconciliation run fails on page 2 and then resumes at page 2.
+`bin/shopify-audit` traces each total to the delivery or reconciliation run
+that recorded it. Finally, `bin/shopify-backup` writes a verified online
+snapshot whose totals match the live ledger.
 
 See the [Shopify verification runs](VERIFICATION.md#shopify-verification) and
 [recorded demo evidence](shopify-evidence.jsonl).
@@ -97,15 +106,89 @@ From another terminal with the same configuration:
 
 ```sh
 bin/shopify-worker --once
+bin/shopify-worker --drain            # until idle; add --limit N to cap outcomes
+bin/shopify-worker --watch            # drain, poll every second; SIGTERM stops after the current delivery
 bin/shopify-summary example.myshopify.com
 bin/reconcile example.myshopify.com
 ```
 
-`--once` processes one eligible delivery. It reports `processed`, `idle`, or
-`retry`. A retry exits nonzero and defers the delivery for 2, 4, 8, 16, 32,
-then at most 60 seconds per attempt. The worker selects the oldest eligible
-delivery and can process other orders while a failure backs off. Invoke the
-worker repeatedly to drain the inbox.
+`--once` processes one eligible delivery. It reports `processed`, `idle`,
+`retry` or `parked`. A retry exits nonzero and defers the delivery for 2, 4, 8,
+16, 32, then at most 60 seconds per attempt. The worker selects the oldest
+eligible delivery and can process other orders while a failure backs off.
+`--drain` repeats until no delivery is eligible and prints counts such as
+`{"processed":12,"retry":1,"parked":0,"status":"idle"}`. It exits 1 if any
+delivery was deferred or parked, or if storage failed.
+
+Several workers can drain one database at once. Each worker claims a delivery
+in a short write transaction before fetching it, so concurrent workers never
+spend Admin API calls on the same delivery. A claim lasts for the longest
+possible fetch. If the claiming process has exited, another worker takes the
+claim over immediately, so a killed worker's delivery is retried at once.
+Workers wait up to 5 s for the SQLite write lock. The webhook keeps a 250 ms
+wait so that it can answer 503 well within Shopify's delivery timeout.
+
+Shopify often sends several `orders/updated` webhooks for one order in quick
+succession. Every delivery for the order that was committed before a fetch
+started is answered by that fetch, so the worker completes those deliveries in
+the same transaction as the payments (`coalesced_deliveries` in the log). A
+delivery that arrives during the fetch is newer than the fetched state, so it
+gets its own fetch. Parked deliveries are never completed this way.
+
+Each Admin API request is retried inside one attempt on HTTP 429, 500, 502,
+503 and 504, on GraphQL `THROTTLED`, and on connection errors. Waits are 0.25 s
+then doubling, and `Retry-After` is honoured up to 2 s. Set `api_attempts`
+(1 to 10, default 3) in the configuration to change this. Every query is
+read-only, so retrying one never changes Shopify state. Malformed or
+incomplete responses are not retried; they count as a failed attempt. The client
+also reads GraphQL query cost from `extensions.cost`. A `THROTTLED` retry waits
+until the bucket has refilled enough for the requested cost. When a successful
+call leaves less than the cost of another such query, the client waits before
+the next call. That wait is logged as `admin_api_pacing`. Both waits are capped
+at 2 s.
+
+### Operating the ledger
+
+```sh
+bin/shopify-status                                   # every configured shop
+bin/shopify-status example.myshopify.com
+bin/shopify-status --prometheus                      # metrics text for a scraper
+bin/reconcile --all                                  # every configured shop, e.g. from cron
+bin/shopify-backup /backups/ledger-$(date +%F).sqlite3
+bin/shopify-maintain                                 # VACUUM in a quiet period; refuses while a writer is active
+bin/shopify-deliveries list example.myshopify.com --state parked
+bin/shopify-deliveries retry example.myshopify.com WEBHOOK_ID
+bin/shopify-audit example.myshopify.com --order gid://shopify/Order/101
+```
+
+- `bin/shopify-status` reads one consistent SQLite snapshot per call. For each
+  shop it reports pending, failing, parked and processed deliveries, the age
+  of the oldest pending delivery, the open and last completed reconciliation
+  run, the checkpoint age, which transactions came from webhooks versus
+  reconciliation repair, and the totals. It exits 0 when every shop is healthy
+  and 2 when a shop needs attention, so a cron job or probe can alert on it.
+  `reasons` explains each problem: parked deliveries, a pending delivery
+  waiting over 15 minutes, a failed reconciliation run, a checkpoint over two
+  hours old, reconciliation that has never completed, or unreadable totals.
+- `--prometheus` prints the same counts and ages in Prometheus text format: health, deliveries by state, oldest pending age, checkpoint age, open runs and transactions by source. The exit status is the same as for JSON. Money totals are left out on purpose: metric samples are floats, and totals must stay exact.
+- `bin/reconcile --all` reconciles each configured shop in turn and prints one result per shop. A shop that fails is reported, does not stop the others, and makes the command exit 1. Its run stays resumable.
+- `bin/shopify-backup DEST` copies the live database with SQLite's online backup API while webhooks and workers keep writing. The copy is one committed snapshot, so every processed delivery has its payments. It passes `PRAGMA integrity_check` and the current schema check before it is renamed into place. The command refuses to overwrite an existing file and never leaves a partial copy. It prints the copy's delivery, transaction and per-shop totals so they can be compared with the live database.
+- `bin/shopify-maintain` checks the schema and runs VACUUM in SQLite exclusive locking mode, so no webhook or worker writes between the check and the rebuild. It compares per-shop totals before and after the VACUUM. If any writer holds the database, it exits 1 with "busy" instead of waiting, and webhooks then get retryable 503s. Run it while nothing is writing.
+- After `max_attempts` failed attempts (1 to 1000, default 12) a delivery is
+  **parked**. The worker never selects it again, so a poison order cannot use
+  up worker time, and other orders keep flowing. `bin/shopify-deliveries list`
+  shows deliveries by state with attempt counts, the last error and
+  timestamps. `retry` gives one parked or failing delivery a fresh attempt
+  budget and records the requeue. It refuses a processed delivery because its
+  effects are final, and it refuses an unknown delivery ID.
+- `bin/shopify-audit` explains a total. Each stored transaction lists the
+  delivery (`recorded_by: delivery`, `reference: WEBHOOK_ID`) or reconciliation
+  run (`reconciliation`, run ID) that first recorded it, plus the time it was
+  recorded. `--order` adds that order's totals and every webhook delivery that
+  referenced it. Rows written before provenance tracking report `unknown`.
+- The worker, reconciliation and Admin retries write one JSON object per line
+  on stderr, for example `{"event":"delivery_parked","shop":...,"delivery":...,"attempt":12,"error":...}`.
+  Logs carry identifiers and outcomes only, never tokens or webhook bodies.
 
 ### Storage and recovery
 
@@ -113,7 +196,8 @@ worker repeatedly to drain the inbox.
 - The worker fetches a complete order transaction set through Admin GraphQL `2026-10` outside the SQLite write transaction. It requires an exact transaction count and distinct IDs. It counts successful sales and captures as collected, and successful refunds as positive refunds. Net is collected minus refunded. Totals are exact decimal strings separated by shop and shop currency. They describe observed order payment transactions.
 - Worker writes and the inbox processed flag commit together. A delivery ID deduplicates HTTP retries, and a transaction ID deduplicates payment effects across different deliveries. Shopify webhook delivery order is irrelevant because each accepted delivery points to the current order transactions.
 - Reconciliation reads a fixed window of changed orders using `UPDATED_AT`. It saves the start of the first seven-day window before fetching page one. A retry keeps that starting point even if the first scan failed days ago. After a successful run, later scans start five minutes before the completed checkpoint. Failed scans can leave imported orders durable while preserving the checkpoint for replay. Recovery covers the chosen window and the shop's authorized order history.
-- Older Shopify ledger databases upgrade automatically in a SQLite transaction. Commands verify the application tables before reporting merchant totals. An incompatible database produces an error.
+- Each window is a durable `reconciliation_runs` row. After every fully applied page, the run stores the next page cursor. A failed or killed run resumes at the first page it had not applied, then a fresh window runs up to now. Resuming is safe because the window's upper bound is fixed. An order updated after the failure leaves this window and falls inside the next one, which starts five minutes before this window's end. If a saved cursor fails on its first reuse (for example, because it expired), the next attempt rescans the window from page one. Repeated pages are idempotent because payments are identified by transaction ID. Only one unfinished run per shop can exist.
+- The schema is versioned. Each command compares the database's table definitions with every known version and applies only the later migrations, all in one SQLite transaction. SQLite DDL is transactional, so a failed upgrade leaves the previous version intact and a later command can retry it. Commands verify the application tables before reporting merchant totals. An unrecognized database produces an error and is not modified.
 - The demo proves recovery from process death on one host. Verification uses synthetic Shopify responses and a single SQLite database. A live Shopify installation, power loss, and multi-host operation are outside the verified scope.
 
 [Shopify webhook verification](https://shopify.dev/docs/apps/build/webhooks/verify-deliveries) ·
@@ -162,6 +246,12 @@ Doctor supports the original ledger's rollback journal. It reports a missing led
 
 ## Benchmark
 
+`ruby benchmark/shopify_drain.rb` drains 200 deliveries against a fake Admin API that answers in 50 ms. One worker processed 17.9 deliveries/s and eight processed 122.8/s, with exactly one fetch per delivery ([results](VERIFICATION.md#concurrent-workers)).
+
+`ruby benchmark/shopify_ingest.rb` measures webhook acknowledgments under concurrent senders and drain workers ([results](VERIFICATION.md#webhook-ingest-under-contention)).
+
+`ruby benchmark/shopify_operations.rb` times Shopify worker selection and `bin/shopify-status` against 50,000 parked and 50,000 processed deliveries ([results](VERIFICATION.md#measured-boundary-parked-history)).
+
 Run `bin/benchmark --full` for the 100,000-event workload, or `bin/benchmark --smoke` to check the same paths quickly. This single-writer sample used an Apple M5 with 16 GiB, Ruby 3.4.13 and SQLite 3.54.1.
 
 | Measured boundary | Samples | Throughput | p50 / p95 |
@@ -186,10 +276,12 @@ Tested on macOS arm64 with Ruby 3.4.13, Bundler 4.1.0, sqlite3 gem 2.10.2, and M
 
 Linux CI is configured for Ubuntu 22.04. To try the sequence CLI as an installed RubyGem, see the [local gem installation](VERIFICATION.md#reproduce-the-isolated-gem-install).
 
-Run these commands from the project directory.
+Run these commands from the project directory. `bin/setup` checks the Ruby
+version in `.ruby-version`, installs the locked gems, and runs
+`bin/shopify-ops-demo` against a scratch directory. It is safe to rerun.
 
 ```sh
-bundle check || bundle install
+bin/setup
 bin/check
 bin/demo
 bin/demo --evidence > evidence.jsonl

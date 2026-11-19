@@ -138,9 +138,10 @@ module ShopifyScenarios
       equal(retried.fetch("transactions"), run.snapshot.fetch("transactions"), "overlap leaves durable transactions unchanged")
 
       pages = run.admin.requests.select { |request| request["operation"] == "ReconcileOrders" }.map { |request| request.fetch("variables") }
-      equal([nil, nil, "page-2", nil, "page-2", nil, "page-2"], pages.map { |variables| variables["after"] }, "first page revisited on retry")
-      [1, 3, 5].each do |index|
-        equal(pages[index].fetch("filter"), pages[index + 1].fetch("filter"), "fixed time bound within each run")
+      # The retry resumes the failed window at its saved cursor, then scans a fresh window to now.
+      equal([nil, nil, "page-2", "page-2", nil, "page-2", nil, "page-2"], pages.map { |variables| variables["after"] }, "retry resumes at saved cursor")
+      [[1, 2], [2, 3], [4, 5], [6, 7]].each do |first, second|
+        equal(pages[first].fetch("filter"), pages[second].fetch("filter"), "fixed time bound within each run")
       end
       bounds = pages.map do |page|
         window = page.fetch("filter").match(/\Aupdated_at:>='([^']+)' updated_at:<='([^']+)'\z/)
@@ -151,7 +152,8 @@ module ShopifyScenarios
       equal(7 * 86_400, (bounds[0][1] - bounds[0][0]).to_i, "initial seven-day lookback")
       equal(Time.iso8601(start) - 300, bounds[1][0], "five-minute overlap after first checkpoint")
       equal(bounds[1][0], bounds[3][0], "failed run did not advance retry's lower bound")
-      equal(Time.iso8601(retry_result.fetch("synced_through")) - 300, bounds[5][0], "overlap after retry checkpoint")
+      equal(bounds[1][1] - 300, bounds[4][0], "fresh window overlaps the resumed window")
+      equal(Time.iso8601(retry_result.fetch("synced_through")) - 300, bounds[6][0], "overlap after retry checkpoint")
       {
         "type" => "reconciliation_retry", "before" => start, "failure" => failure,
         "after_failure" => durable, "retry" => retry_result, "overlap" => rerun,

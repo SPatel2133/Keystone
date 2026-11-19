@@ -47,14 +47,17 @@ module ShopifyLedger
       end
     end
 
-    def self.apply(db, shop, order_id, entries)
-      entries.each do |transaction_id, currency, kind, amount|
+    # Returns the number of newly recorded payment transactions. The source names
+    # the delivery or reconciliation run that first established each row.
+    def self.apply(db, shop, order_id, entries, source: nil)
+      recorded_at = Time.now.to_i
+      entries.count do |transaction_id, currency, kind, amount|
         stored = db.get_first_row(<<~SQL, [shop, transaction_id])
           SELECT order_id, currency, kind, amount
           FROM transactions WHERE shop = ? AND transaction_id = ?
         SQL
         values = [order_id, currency, kind, amount]
-        next if stored == values
+        next false if stored == values
 
         if stored
           stored_order, stored_currency, stored_kind, stored_amount = stored
@@ -66,13 +69,14 @@ module ShopifyLedger
           # Older ledgers accepted arbitrary three- or four-letter currency codes.
           db.execute("UPDATE transactions SET currency = ? WHERE shop = ? AND transaction_id = ?",
                      [currency, shop, transaction_id])
-          next
+          next false
         end
 
-        db.execute(<<~SQL, [shop, transaction_id, *values])
-          INSERT INTO transactions (shop, transaction_id, order_id, currency, kind, amount)
-          VALUES (?, ?, ?, ?, ?, ?)
+        db.execute(<<~SQL, [shop, transaction_id, *values, recorded_at, source])
+          INSERT INTO transactions (shop, transaction_id, order_id, currency, kind, amount, recorded_at, source)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         SQL
+        true
       end
     end
 
@@ -99,6 +103,5 @@ module ShopifyLedger
       # sqlite3 1.3 binds ASCII-8BIT strings as BLOBs.
       "#{whole}.#{fraction.to_s.ljust(2, "0")}".encode(Encoding::UTF_8)
     end
-    private_class_method :format_decimal
   end
 end
