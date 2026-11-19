@@ -167,7 +167,7 @@ module ShopifyLedger
       body = StrictJSON.parse(response.body.to_s)
       if body.is_a?(Hash) && body["errors"].is_a?(Array) &&
          body["errors"].any? { |e| e.is_a?(Hash) && e.dig("extensions", "code") == "THROTTLED" }
-        raise Transient, "Admin API throttled the query"
+        raise Transient.new("Admin API throttled the query", bucket_wait(body))
       end
       unless body.is_a?(Hash) && (!body.key?("errors") || body["errors"] == []) && body["data"].is_a?(Hash)
         raise Error, "Admin API returned GraphQL errors or missing data"
@@ -178,12 +178,36 @@ module ShopifyLedger
         raise Error, "Admin API reported search warnings"
       end
 
+      pace(operation, body)
       body.fetch("data")
     rescue JSON::ParserError
       raise Error, "Admin API returned invalid JSON"
     rescue IOError, SocketError, SystemCallError, Net::ProtocolError, Net::HTTPBadResponse,
            Net::HTTPHeaderSyntaxError, Timeout::Error, OpenSSL::SSL::SSLError, Zlib::Error => error
       raise Transient, "Admin API request failed (#{error.class})"
+    end
+
+    # Shopify meters GraphQL by query cost from a leaky bucket and reports it in
+    # extensions.cost. Waiting for the bucket to refill before the next call is
+    # cheaper than being throttled and retrying.
+    def pace(operation, body)
+      wait = bucket_wait(body)
+      return unless wait
+
+      Log.event("admin_api_pacing", shop: @shop, operation: operation, wait_seconds: wait)
+      @sleeper.call(wait)
+    end
+
+    def bucket_wait(body)
+      cost = body.dig("extensions", "cost") if body["extensions"].is_a?(Hash)
+      return unless cost.is_a?(Hash) && cost["throttleStatus"].is_a?(Hash)
+
+      requested = cost["requestedQueryCost"]
+      available, rate = cost["throttleStatus"].values_at("currentlyAvailable", "restoreRate")
+      return unless [requested, available, rate].all? { |value| value.is_a?(Numeric) && value >= 0 } && rate.positive?
+
+      deficit = requested - available
+      deficit.positive? ? [(deficit / rate.to_f).round(3), MAX_DELAY].min : nil
     end
   end
 end

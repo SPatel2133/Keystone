@@ -78,6 +78,41 @@ class ShopifyApiResilienceTest < Minitest::Test
     end
   end
 
+  def cost(requested, available, rate = 50.0)
+    { cost: { requestedQueryCost: requested, actualQueryCost: requested,
+              throttleStatus: { maximumAvailable: 1000.0, currentlyAvailable: available, restoreRate: rate } } }
+  end
+
+  def test_query_cost_paces_calls_and_sizes_the_throttle_retry
+    ShopifyFixture.run do |run|
+      run.configure(api_attempts: 3)
+      deliver_one(run)
+      throttled = { errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }], extensions: cost(52, 12) }
+      transactions = [ShopifyScenarios.sale]
+      success = { data: { order: { id: ORDER, transactions: transactions, transactionsCount: { count: 1, precision: "EXACT" } } },
+                  extensions: cost(52, 32) }
+      run.admin.arrange(ALPHA, "OrderPayments", ORDER, throttled) { run.admin.arrange(ALPHA, "OrderPayments", ORDER, success) }
+      _stdout, stderr, process = run.command("bin/shopify-worker", "--once")
+      assert process.success?, stderr
+      events = stderr.lines.map { |line| JSON.parse(line) }
+      retry_log = events.find { |event| event["event"] == "admin_api_retry" }
+      assert_equal 0.8, retry_log.fetch("delay_seconds")
+      pacing = events.find { |event| event["event"] == "admin_api_pacing" }
+      assert_equal [ALPHA, "OrderPayments", 0.4], pacing.values_at("shop", "operation", "wait_seconds")
+      assert_equal ShopifyScenarios::BEFORE, run.summary
+    end
+  end
+
+  def test_bucket_wait_ignores_missing_or_malformed_cost
+    admin = ShopifyLedger::Admin.allocate
+    wait = ->(body) { admin.send(:bucket_wait, JSON.parse(JSON.generate(body))) }
+    assert_nil wait.call({})
+    assert_nil wait.call({ extensions: cost(10, 500) })
+    assert_nil wait.call({ extensions: cost(10, 5, 0) })
+    assert_nil wait.call({ extensions: cost("10", 5) })
+    assert_equal 2.0, wait.call({ extensions: cost(1000, 0) })
+  end
+
   def test_retry_delay_is_exponential_and_honours_a_capped_retry_after
     assert_equal [0.25, 0.5, 1.0, 2.0, 2.0], (1..5).map { |attempt| ShopifyLedger::Admin.delay(attempt) }
     assert_equal 1.5, ShopifyLedger::Admin.delay(1, 1.5)

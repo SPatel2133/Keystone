@@ -133,7 +133,12 @@ Each Admin API request is retried inside one attempt on HTTP 429, 500, 502,
 then doubling, and `Retry-After` is honoured up to 2 s. Set `api_attempts`
 (1 to 10, default 3) in the configuration to change this. Every query is
 read-only, so retrying one never changes Shopify state. Malformed or
-incomplete responses are not retried; they count as a failed attempt.
+incomplete responses are not retried; they count as a failed attempt. The client
+also reads GraphQL query cost from `extensions.cost`. A `THROTTLED` retry waits
+until the bucket has refilled enough for the requested cost. When a successful
+call leaves less than the cost of another such query, the client waits before
+the next call. That wait is logged as `admin_api_pacing`. Both waits are capped
+at 2 s.
 
 ### Operating the ledger
 
