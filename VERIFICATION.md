@@ -191,6 +191,8 @@ The PostgreSQL fuzzer now runs two workers at once on separate connections on ev
 
 `test_concurrent_workers_on_the_same_orders_never_deadlock` uses 4 threads on 20 orders × 3 deliveries. It raised `PG::TRDeadlockDetected` in 3 of 3 runs before the fix. Completion locked only its own inbox row, then updated the other same-order rows. It now locks every same-order row up to the fence in ID order first.
 
+As a mutation check, I reverted only the lock-ordering fix and ran seeds 31–50 (200 steps each) one by one. 11 of the 20 failed with `concurrent worker raised PG::TRDeadlockDetected`, each within 1–2.3 s, and the fix was then restored. The original campaign "hang" was shrinking working through many failing runs. Runs are now also bounded by `SHOPIFY_FUZZ_RUN_TIMEOUT` (default 120 s).
+
 A longer campaign after the fix, `--postgres --seed 800000 --runs 300 --steps 300` with concurrent workers, performed 90,000 operations with 0 failures in 666.9 s.
 
 After the fix, the test passed 3 of 3 runs, the seed-31 campaign had 0 failures in 31.3 s, and `bin/shopify-check` passed 89 runs / 950 assertions.
