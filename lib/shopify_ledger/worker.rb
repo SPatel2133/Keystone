@@ -6,9 +6,9 @@ require_relative "storage"
 
 module ShopifyLedger
   class Worker
-    def initialize(config)
+    def initialize(config, database: config.database)
       @config = config
-      @storage = Storage.new(config.database, busy_timeout: BUSY_TIMEOUT_MS)
+      @storage = Storage.new(database, busy_timeout: BUSY_TIMEOUT_MS)
     end
 
     BUSY_TIMEOUT_MS = 5000

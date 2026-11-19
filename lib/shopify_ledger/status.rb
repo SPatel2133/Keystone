@@ -11,18 +11,19 @@ module ShopifyLedger
 
     def initialize(config, clock: -> { Time.now })
       @config = config
-      @storage = Storage.new(config.database)
       @clock = clock
     end
 
     def report(shops)
       now = @clock.call.to_i
-      @storage.connect do |db|
-        db.transaction(:deferred)
-        begin
-          shops.map { |shop| shop_status(db, shop, now) }
-        ensure
-          db.rollback if db.transaction_active?
+      shops.map do |shop|
+        Storage.new(@config.database_for(shop)).connect do |db|
+          db.transaction(:deferred)
+          begin
+            shop_status(db, shop, now)
+          ensure
+            db.rollback if db.transaction_active?
+          end
         end
       end
     end

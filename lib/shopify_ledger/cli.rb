@@ -35,7 +35,7 @@ module ShopifyLedger
       config.api(shop)
       if command == :summary
         require_relative "payments"
-        totals = Storage.new(config.database).connect { |db| Payments.summary(db, shop) }
+        totals = Storage.new(config.database_for(shop)).connect { |db| Payments.summary(db, shop) }
         puts JSON.generate(shop: shop, totals: totals)
       else
         require_relative "reconciliation"
@@ -65,7 +65,9 @@ module ShopifyLedger
       raise ArgumentError, usage if hooks.any? && arguments != ["--once"]
 
       require_relative "worker"
-      worker = Worker.new(Config.load)
+      config = Config.load
+      # SHOPIFY_LEDGER_DATABASE names which routed database this worker drains.
+      worker = Worker.new(config, database: config.database_named(ENV["SHOPIFY_LEDGER_DATABASE"]))
       if arguments == ["--once"]
         status = worker.run_once(**hooks)
         puts JSON.generate(status: status)

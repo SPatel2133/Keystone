@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/move_shop"
+
+seam = ENV.fetch("SHOPIFY_TEST_CRASH", "")
+abort "unknown move crash seam" unless %w[after_copy after_switch].include?(seam)
+exit ShopifyLedger::MoveShop.cli(ARGV, seam.to_sym => -> { Process.kill("KILL", Process.pid) })

@@ -55,3 +55,8 @@ Run `test/whiteboard` from the project root to compare the deliberately broken s
 - A dead worker's delivery waits up to the lease length before another worker takes it.
 - Applying payments is idempotent, so a worker whose lease expired mid-fetch can at worst repeat a fetch. It cannot double-count.
 - Only the worker path is ported. Ingest, reconciliation and the operator tools would follow the same adapter.
+
+**Moving a shop between databases.** *What:* `bin/shopify-move-shop` copies and verifies, then switches the route, then cleans up. Each step is idempotent, and a crash test covers each seam. *Why:* sharding by shop means a shop eventually has to move without losing or double-counting money. *Tradeoffs:*
+- The route lives in the config file, so running processes must be restarted, and ingest must pause during the move.
+- With a central routing table and a per-shop write fence, the move could run online.
+- Cleanup refuses rather than merging when the old copy changed. Merging two inboxes automatically is exactly where silent loss would hide.

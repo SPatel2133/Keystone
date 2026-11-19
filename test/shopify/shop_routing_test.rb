@@ -1,0 +1,164 @@
+require "minitest/autorun"
+require_relative "../../lib/event_consumer/bundle"
+require_relative "../support/shopify_fixture"
+
+class ShopifyShopRoutingTest < Minitest::Test
+  include ShopifyFixture
+
+  def route(run, routes = {})
+    path = File.join(File.dirname(run.database), "config.json")
+    data = JSON.parse(File.read(path))
+    data["databases"] = { "eu" => "eu.sqlite3" }
+    routes.each { |shop, name| data["shops"][shop]["database"] = name }
+    File.write(path, JSON.generate(data))
+    File.join(File.dirname(run.database), "eu.sqlite3")
+  end
+
+  def config(run) = JSON.parse(File.read(File.join(File.dirname(run.database), "config.json")))
+
+  def read(path, sql)
+    SQLite3::Database.new(path) { |db| return db.execute(sql) }
+  end
+
+  def with_database(name)
+    ENV["SHOPIFY_LEDGER_DATABASE"] = name
+    yield
+  ensure
+    ENV.delete("SHOPIFY_LEDGER_DATABASE")
+  end
+
+  def move(run, shop = ALPHA, seam: nil)
+    run.command(seam ? "test/support/shopify-move-shop-with-hooks" : "bin/shopify-move-shop", shop, "--to", "eu", seam: seam)
+  end
+
+  # A processed sale, a completed reconciliation and one pending delivery.
+  def seed(run)
+    run.admin.order([ShopifyFixture.transaction(SALE, "SALE", "100.00")])
+    run.admin.page([ORDER])
+    run.with_endpoint { assert_equal 200, run.deliver("sale") }
+    assert_equal({ "status" => "processed" }, run.worker)
+    run.reconcile
+    run.with_endpoint { assert_equal 200, run.deliver("later") }
+  end
+
+  def counts(path, shop = ALPHA)
+    %w[inbox transactions payment_events checkpoints reconciliation_runs].map do |table|
+      read(path, "SELECT COUNT(*) FROM #{table} WHERE shop = '#{shop}'").first.first
+    end
+  end
+
+  def test_each_shop_lives_in_its_routed_database
+    ShopifyFixture.run do |run|
+      eu = route(run, BETA => "eu")
+      run.admin.order([ShopifyFixture.transaction(SALE, "SALE", "100.00")])
+      run.admin.order([ShopifyFixture.transaction(SALE, "SALE", "7.00", "USD")], shop: BETA)
+      run.with_endpoint do
+        assert_equal 200, run.deliver("a", shop: ALPHA)
+        assert_equal 200, run.deliver("b", shop: BETA)
+      end
+      assert_equal [[ALPHA]], read(run.database, "SELECT shop FROM inbox")
+      assert_equal [[BETA]], read(eu, "SELECT shop FROM inbox")
+      assert_equal({ "status" => "processed" }, run.worker)
+      assert_equal({ "status" => "idle" }, run.worker)
+      with_database("eu") { assert_equal({ "status" => "processed" }, run.worker) }
+      assert_equal "100.00", run.summary(ALPHA).fetch("totals").first.fetch("net")
+      assert_equal "7.00", run.summary(BETA).fetch("totals").first.fetch("net")
+      status = run.json("bin/shopify-status", success: false).fetch("shops").to_h { |shop| [shop["shop"], shop["transactions"]["total"]] }
+      assert_equal({ ALPHA => 1, BETA => 1 }, status)
+    end
+  end
+
+  def test_move_copies_verifies_switches_and_cleans_up
+    ShopifyFixture.run do |run|
+      seed(run)
+      eu = route(run)
+      before = counts(run.database)
+      stdout, stderr, status = move(run)
+      assert status.success?, stderr
+      report = JSON.parse(stdout)
+      assert_equal 2, report.fetch("copied").fetch("inbox")
+      assert_equal "100.00", report.fetch("totals").first.fetch("net")
+      assert_equal "eu", config(run).fetch("shops").fetch(ALPHA).fetch("database")
+      assert_equal before, counts(eu)
+      assert_equal [0, 0, 0, 0, 0], counts(run.database)
+
+      with_database("eu") { assert_equal({ "status" => "processed" }, run.worker) }
+      assert_equal "100.00", run.summary.fetch("totals").first.fetch("net")
+      assert_equal [[2, 2]], read(eu, "SELECT SUM(processed), COUNT(*) FROM inbox")
+      assert_equal [[1]], read(eu, "SELECT COUNT(*) FROM transactions")
+      refute_nil run.reconcile
+    end
+  end
+
+  def test_crash_after_copy_keeps_the_old_route_and_a_rerun_finishes
+    ShopifyFixture.run do |run|
+      seed(run)
+      eu = route(run)
+      before = counts(run.database)
+      _stdout, _stderr, status = move(run, seam: "after_copy")
+      assert_equal 9, status.termsig
+      assert_nil config(run).fetch("shops").fetch(ALPHA)["database"]
+      assert_equal before, counts(run.database)
+      assert_equal "100.00", run.summary.fetch("totals").first.fetch("net")
+
+      _stdout, stderr, status = move(run)
+      assert status.success?, stderr
+      assert_equal before, counts(eu)
+      assert_equal [0, 0, 0, 0, 0], counts(run.database)
+    end
+  end
+
+  def test_crash_after_switch_is_finished_by_a_rerun_that_only_cleans_up
+    ShopifyFixture.run do |run|
+      seed(run)
+      eu = route(run)
+      before = counts(run.database)
+      _stdout, _stderr, status = move(run, seam: "after_switch")
+      assert_equal 9, status.termsig
+      assert_equal "eu", config(run).fetch("shops").fetch(ALPHA).fetch("database")
+      assert_equal before, counts(run.database), "the old copy stays until cleanup"
+      assert_equal "100.00", run.summary.fetch("totals").first.fetch("net")
+
+      stdout, stderr, status = move(run)
+      assert status.success?, stderr
+      assert_nil JSON.parse(stdout)["copied"]
+      assert_equal before, counts(eu)
+      assert_equal [0, 0, 0, 0, 0], counts(run.database)
+    end
+  end
+
+  def test_cleanup_refuses_when_the_old_database_received_new_rows
+    ShopifyFixture.run do |run|
+      seed(run)
+      route(run)
+      move(run, seam: "after_switch")
+      # A webhook process still holding the old route wrote here after the copy.
+      SQLite3::Database.new(run.database) do |db|
+        db.execute("INSERT INTO inbox (shop, webhook_id, topic, order_id, received_at) VALUES (?, 'stray', 'orders/updated', ?, 0)",
+                   [ALPHA, ORDER])
+      end
+      _stdout, stderr, status = move(run)
+      refute status.success?
+      assert_match(/inbox rows for #{Regexp.escape(ALPHA)} that differ from the routed copy/, stderr)
+      assert_equal 3, read(run.database, "SELECT COUNT(*) FROM inbox").first.first
+    end
+  end
+
+  def test_rejects_unknown_databases_and_bad_usage
+    ShopifyFixture.run do |run|
+      route(run)
+      _stdout, stderr, status = run.command("bin/shopify-move-shop", ALPHA, "--to", "mars")
+      assert_equal 1, status.exitstatus
+      assert_match(/unknown database "mars"/, stderr)
+      _stdout, _stderr, status = run.command("bin/shopify-move-shop", ALPHA)
+      assert_equal 64, status.exitstatus
+      path = File.join(File.dirname(run.database), "config.json")
+      data = JSON.parse(File.read(path))
+      data["shops"][ALPHA]["database"] = "mars"
+      File.write(path, JSON.generate(data))
+      _stdout, stderr, status = run.command("bin/shopify-summary", ALPHA)
+      refute status.success?
+      assert_match(/unknown database/, stderr)
+    end
+  end
+end
