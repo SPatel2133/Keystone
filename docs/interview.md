@@ -50,3 +50,8 @@ Run `test/whiteboard` from the project root to compare the deliberately broken s
 - Status only moves from an open status to a final one. A stale fetch that shows an older open status is ignored rather than rejected, because two workers can fetch the same order at different moments.
 - Refunds above the collected amount, and captures above their authorization, are reported, not rejected. Shopify is the source of truth, and rejecting would park the delivery forever.
 - Presentment money is stored but never converted. Converting would need an exchange rate that the ledger does not own.
+
+**PostgreSQL workers.** *What:* `bin/shopify-pg-worker` claims deliveries with `FOR UPDATE SKIP LOCKED` and a 60 s lease, then applies the shared payment rules through a small adapter. *Why:* SQLite claims rely on PID liveness, which only works on one host. SKIP LOCKED lets many machines pick different rows without waiting on each other. *Tradeoffs:*
+- A dead worker's delivery waits up to the lease length before another worker takes it.
+- Applying payments is idempotent, so a worker whose lease expired mid-fetch can at worst repeat a fetch. It cannot double-count.
+- Only the worker path is ported. Ingest, reconciliation and the operator tools would follow the same adapter.

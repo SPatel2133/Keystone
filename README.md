@@ -215,6 +215,28 @@ Chargebacks and disputes are out of scope. In Admin GraphQL `2026-10` they are
 order transaction kinds. The money movement they cause shows up as transactions
 on the order.
 
+### PostgreSQL backend (workers on several machines)
+
+`bin/shopify-pg-worker --once | --drain | summary SHOP` runs the same payment
+rules (`Payments.apply`, `observe`, `review`) against PostgreSQL. It needs
+`SHOPIFY_LEDGER_POSTGRES_URL` and the optional gem group
+(`bundle config set --local with postgres && bundle install`).
+
+A worker claims the oldest eligible delivery in one statement:
+`UPDATE inbox SET claimed_by = ?, claimed_until = now + 60 WHERE id = (SELECT … FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING …`.
+The claim is a lease, not a PID, because a PID means nothing on another host.
+A worker that dies keeps its lease until it expires. The Admin fetch runs
+outside any transaction. Completion locks the inbox row (`FOR UPDATE`) and
+commits the payments together with every same-order delivery up to the
+pre-fetch fence.
+
+`test/shopify/postgres_test.rb` runs when `SHOPIFY_LEDGER_POSTGRES_URL` is set,
+and CI provides a `postgres:16` service container. Four workers with different
+machine IDs drain 40 deliveries with exactly 40 Admin fetches. The tests also
+cover workers SIGKILLed before and after commit, and backoff then parking.
+
+Webhook ingest, reconciliation and the operator commands still use SQLite.
+
 ### Randomized crash testing
 
 `bin/shopify-fuzz [--seed N] [--steps N] [--runs N] [--processes]` expands each
