@@ -19,8 +19,12 @@ module ShopifyLedger
       destination = File.expand_path(destination)
       raise Refused, "destination already exists" if File.exist?(destination)
       raise Refused, "destination is the live database" if destination == File.expand_path(@database)
+      raise Refused, "live database not found" unless File.exist?(@database)
 
       partial = "#{destination}.partial-#{Process.pid}"
+      mode = File.stat(@database).mode & 0o777
+      File.open(partial, File::WRONLY | File::CREAT | File::EXCL, mode) {}
+      File.chmod(mode, partial)
       pages = @storage.connect do |source|
         copy = SQLite3::Database.new(partial)
         begin
@@ -35,7 +39,11 @@ module ShopifyLedger
         end
       end
       report = verify(partial)
-      File.rename(partial, destination)
+      begin
+        File.link(partial, destination)
+      rescue Errno::EEXIST
+        raise Refused, "destination already exists"
+      end
       report.merge(backup: destination, pages: pages, bytes: File.size(destination))
     ensure
       FileUtils.rm_f(partial) if partial && File.exist?(partial)
