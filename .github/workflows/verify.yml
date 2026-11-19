@@ -25,6 +25,7 @@ jobs:
           trap 'rm -rf -- "$scratch"' EXIT
           cd "$scratch"
           unset BUNDLE_GEMFILE RUBYOPT
+          "$GITHUB_WORKSPACE/bin/setup"
           "$GITHUB_WORKSPACE/bin/check"
           "$GITHUB_WORKSPACE/bin/shopify-check"
           "$GITHUB_WORKSPACE/bin/demo"

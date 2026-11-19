@@ -252,10 +252,12 @@ Tested on macOS arm64 with Ruby 3.4.13, Bundler 4.1.0, sqlite3 gem 2.10.2, and M
 
 Linux CI is configured for Ubuntu 22.04. To try the sequence CLI as an installed RubyGem, see the [local gem installation](VERIFICATION.md#reproduce-the-isolated-gem-install).
 
-Run these commands from the project directory.
+Run these commands from the project directory. `bin/setup` checks the Ruby
+version in `.ruby-version`, installs the locked gems, and runs
+`bin/shopify-ops-demo` against a scratch directory. It is safe to rerun.
 
 ```sh
-bundle check || bundle install
+bin/setup
 bin/check
 bin/demo
 bin/demo --evidence > evidence.jsonl
