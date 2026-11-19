@@ -122,7 +122,8 @@ module ShopifyFixture
       shops = [ALPHA, BETA].each_with_object({}) do |shop, configs|
         configs[shop] = { endpoint: admin.endpoint, token: "fake-token-for-#{shop}" }
       end
-      File.write(@config_path, JSON.generate(database: database, secret: SECRET, shops: shops, **settings))
+      # Most scenarios count exact Admin requests, so in-request retries are opt-in.
+      File.write(@config_path, JSON.generate(database: database, secret: SECRET, shops: shops, api_attempts: 1, **settings))
     end
 
     def with_endpoint(seam: nil)
