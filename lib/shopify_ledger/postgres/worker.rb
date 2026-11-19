@@ -21,7 +21,7 @@ module ShopifyLedger
 
       def run_once(before_commit: nil, after_commit: nil)
         claim = claim_next or return "idle"
-        id, shop, order_id, attempts, webhook_id = claim
+        id, shop, order_id, attempts, requeues, webhook_id = claim
         fence = @db.get_first_value("SELECT MAX(id) FROM inbox WHERE shop = ? AND order_id = ?", [shop, order_id])
         raise Admin::Error, "Delivery shop is no longer configured" unless @config.shop?(shop)
 
@@ -47,7 +47,7 @@ module ShopifyLedger
         "processed"
       rescue Admin::Error, Payments::Error => error
         # A stale failure is dropped; take the next claim, as the SQLite worker does.
-        defer(id, attempts, error) || run_once(before_commit: before_commit, after_commit: after_commit)
+        defer(id, attempts, requeues, error) || run_once(before_commit: before_commit, after_commit: after_commit)
       end
 
       private
@@ -63,18 +63,18 @@ module ShopifyLedger
             ORDER BY id LIMIT 1
             FOR UPDATE SKIP LOCKED
           )
-          RETURNING id, shop, order_id, attempts, webhook_id
+          RETURNING id, shop, order_id, attempts, requeues, webhook_id
         SQL
       end
 
-      def defer(id, attempts, error)
+      def defer(id, attempts, requeues, error)
         now = Time.now.to_i
         parked = attempts + 1 >= @config.max_attempts
         # The attempts guard drops a stale failure after an operator retry.
-        updated = @db.execute(<<~SQL, [error.message, now + [2**(attempts + 1), 60].min, parked ? now : nil, now, id, attempts])
+        updated = @db.execute(<<~SQL, [error.message, now + [2**(attempts + 1), 60].min, parked ? now : nil, now, id, attempts, requeues])
           UPDATE inbox SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, parked_at = ?,
                            last_attempt_at = ?, claimed_by = NULL, claimed_until = NULL
-          WHERE id = ? AND processed = 0 AND parked_at IS NULL AND attempts = ?
+          WHERE id = ? AND processed = 0 AND parked_at IS NULL AND attempts = ? AND requeues = ?
           RETURNING id
         SQL
         if updated.empty?

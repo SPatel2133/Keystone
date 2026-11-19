@@ -64,6 +64,28 @@ class ShopifyDrainTest < Minitest::Test
     end
   end
 
+  def test_stale_failure_does_not_park_a_requeued_delivery
+    ShopifyFixture.run do |run|
+      run.configure(max_attempts: 1)
+      run.admin.arrange(ALPHA, "OrderPayments", order(1000), { errors: [{ message: "down" }] }, code: 500)
+      run.with_endpoint { assert_equal 200, run.deliver("stale-failure", payload: { id: 1000, admin_graphql_api_id: order(1000) }) }
+      requeued = false
+      run.admin.arrange(ALPHA, "OrderPayments", order(1000), { errors: [{ message: "down" }] }, code: 500) do
+        unless requeued
+          requeued = true
+          run.json("bin/shopify-deliveries", "retry", ALPHA, "stale-failure")
+          run.admin.order([ShopifyFixture.transaction("gid://shopify/OrderTransaction/1000", "SALE", "1000.00")],
+                          id: order(1000))
+        end
+      end
+
+      stdout, stderr, status = run.command("bin/shopify-worker", "--once")
+      assert_equal 0, status.exitstatus, stderr
+      assert_equal({ "status" => "processed" }, JSON.parse(stdout))
+      assert_equal [[1, nil, 0, 1]], run.read("SELECT processed, parked_at, attempts, requeues FROM inbox")
+    end
+  end
+
   def test_a_live_claim_keeps_other_workers_off_the_order_until_it_finishes
     ShopifyFixture.run do |run|
       arrange_orders(run, 1)

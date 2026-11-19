@@ -66,7 +66,7 @@ module ShopifyLedger
       @storage.connect do |db|
         Storage.transaction(db) do
           row = db.get_first_row(<<~SQL, [now, now, *@foreign]) || orphaned(db, now)
-            SELECT id, shop, order_id, attempts, webhook_id FROM inbox INDEXED BY inbox_eligible
+            SELECT id, shop, order_id, attempts, requeues, webhook_id FROM inbox INDEXED BY inbox_eligible
             WHERE processed = 0 AND parked_at IS NULL AND next_attempt_at <= ?
               AND (claimed_until IS NULL OR claimed_until <= ?)#{@foreign_sql}
             ORDER BY id LIMIT 1
@@ -79,11 +79,11 @@ module ShopifyLedger
 
     def orphaned(db, now)
       orphan = db.execute(<<~SQL, [now, *@foreign]).find { |row| !alive?(row.last) }
-        SELECT id, shop, order_id, attempts, webhook_id, claimed_by FROM inbox INDEXED BY inbox_eligible
+        SELECT id, shop, order_id, attempts, requeues, webhook_id, claimed_by FROM inbox INDEXED BY inbox_eligible
         WHERE processed = 0 AND parked_at IS NULL AND next_attempt_at <= ? AND claimed_by IS NOT NULL#{@foreign_sql}
         ORDER BY id
       SQL
-      orphan&.first(5)
+      orphan&.first(6)
     end
 
     # SQLite is a local file, so every worker shares this host's process table.
@@ -105,7 +105,7 @@ module ShopifyLedger
     end
 
     def process(delivery, before_commit, after_commit)
-      id, shop, order_id, attempts, webhook_id = delivery
+      id, shop, order_id, attempts, requeues, webhook_id = delivery
       raise Admin::Error, "Delivery shop is no longer configured" unless @config.shop?(shop)
 
       # Deliveries for this order committed before the fetch starts are answered
@@ -164,15 +164,15 @@ module ShopifyLedger
 
     # Returns "retry" or "parked", or nil when another worker changed the row first.
     def record_retry(delivery, error)
-      id, _shop, _order_id, attempts = delivery
+      id, _shop, _order_id, attempts, requeues = delivery
       now = Time.now.to_i
       parked = attempts + 1 >= @config.max_attempts
       @storage.connect do |db|
         Storage.transaction(db) do
-          db.execute(<<~SQL, [now + self.class.delay(attempts), error.message, now, parked ? now : nil, id, attempts])
+          db.execute(<<~SQL, [now + self.class.delay(attempts), error.message, now, parked ? now : nil, id, attempts, requeues])
             UPDATE inbox SET attempts = attempts + 1, next_attempt_at = ?, last_error = ?,
                              last_attempt_at = ?, parked_at = ?, claimed_by = NULL, claimed_until = NULL
-            WHERE id = ? AND processed = 0 AND parked_at IS NULL AND attempts = ?
+            WHERE id = ? AND processed = 0 AND parked_at IS NULL AND attempts = ? AND requeues = ?
           SQL
           db.changes == 1 ? (parked ? "parked" : "retry") : nil
         end
