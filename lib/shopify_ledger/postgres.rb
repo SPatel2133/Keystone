@@ -132,6 +132,13 @@ module ShopifyLedger
 
       def connect = yield(@db)
       def transaction(db, &block) = db.transaction { block.call }
+
+      def read(db)
+        db.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        yield
+      ensure
+        db.execute("ROLLBACK")
+      end
     end
 
     def self.receive(db, shop:, webhook_id:, topic:, order_id:)
@@ -257,11 +264,19 @@ module ShopifyLedger
         worker_config.api(shop)
         puts JSON.generate(shop: shop, synced_through: checkpoint)
         0
+      in ["status", *shops]
+        require_relative "status"
+        config = Config.load
+        shops = config.shops if shops.empty?
+        shops.each { |shop| config.api(shop) }
+        report = Status.new(config, store: Store.new(db)).report(shops)
+        puts JSON.generate(generated_at: Time.now.utc.iso8601, shops: report)
+        report.all? { |shop| shop[:health] == "ok" } ? 0 : 2
       in ["summary", String => shop]
         puts JSON.generate(shop: shop, totals: Payments.summary(db, shop))
         0
       else
-        raise ArgumentError, "usage: bin/shopify-pg-worker --once | --drain | reconcile SHOP | summary SHOP"
+        raise ArgumentError, "usage: bin/shopify-pg-worker --once | --drain | reconcile SHOP | status [SHOP...] | summary SHOP"
       end
     ensure
       db&.close

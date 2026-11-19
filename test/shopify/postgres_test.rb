@@ -178,4 +178,26 @@ class ShopifyPostgresTest < Minitest::Test
       assert_equal [nil, "p1", "p1", nil, "p1"], pages
     end
   end
+
+  def test_status_reports_postgres_deliveries_reconciliation_and_payments
+    ShopifyFixture.run do |run|
+      arrange_order(run, 1, "10.00")
+      receive("sale", 1)
+      run.admin.arrange(ALPHA, "OrderPayments", order_gid(2), { errors: [{ message: "down" }] }, code: 500)
+      receive("broken", 2)
+      worker(run, "--drain")
+      run.admin.page([order_gid(1)])
+      stdout, = worker(run, "reconcile", ALPHA)
+      refute_nil JSON.parse(stdout).fetch("synced_through")
+      stdout, stderr, status = worker(run, "status", ALPHA)
+      assert_equal 0, status.exitstatus, stderr
+      shop = JSON.parse(stdout).fetch("shops").first
+      assert_equal "ok", shop.fetch("health")
+      assert_equal [1, 1, 1], shop.fetch("deliveries").values_at("processed", "pending", "failing")
+      assert_equal({ "total" => 1, "from_webhooks" => 1, "repaired_by_reconciliation" => 0, "unknown_source" => 0 },
+                   shop.fetch("transactions"))
+      assert_equal "10.00", shop.fetch("totals").first.fetch("net")
+      assert_equal 0, shop.fetch("payments").fetch("open_transactions")
+    end
+  end
 end

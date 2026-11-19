@@ -219,9 +219,11 @@ on the order.
 
 ### PostgreSQL backend (workers on several machines)
 
-`bin/shopify-pg-worker --once | --drain | reconcile SHOP | summary SHOP` runs
-the same payment rules (`Payments.apply`, `observe`, `review`) and the same
-resumable reconciliation (through `Postgres::Store`) against PostgreSQL. It needs
+`bin/shopify-pg-worker --once | --drain | reconcile SHOP | status [SHOP...] | summary SHOP`
+runs the same payment rules (`Payments.apply`, `observe`, `review`), the same
+resumable reconciliation and the same status report against PostgreSQL. The
+last two go through `Postgres::Store`, and status reads one
+`REPEATABLE READ READ ONLY` snapshot. It needs
 `SHOPIFY_LEDGER_POSTGRES_URL` and the optional gem group
 (`bundle config set --local with postgres && bundle install`).
 
@@ -246,8 +248,8 @@ same PostgreSQL inbox, still after HMAC verification and before the `200`.
 Requests share one connection behind a mutex. A redelivery with a different
 topic or order gets `409`, and a database error returns `503` with
 `Retry-After`. The variable is separate from the URL, so a configured URL alone
-never moves ingest. The operator commands (status, audit, deliveries, backup,
-maintenance, moves) still use SQLite.
+never moves ingest. Audit, the delivery tools, backup, maintenance and moves
+still use SQLite.
 
 ### Routing shops to databases and moving a shop
 

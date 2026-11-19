@@ -20,13 +20,8 @@ module ShopifyLedger
 
     Run = Struct.new(:id, :window_start, :window_end, :cursor, :pages, :resumed, keyword_init: true)
 
-    # Where runs, checkpoints and payments live: the shop's SQLite file by
-    # default, or Postgres::Store. The SQL here is valid in both.
-    SqliteStore = Struct.new(:path) do
-      def connect(&block) = Storage.new(path).connect(&block)
-      def transaction(db, &block) = Storage.transaction(db, &block)
-    end
-
+    # Runs, checkpoints and payments live in the shop's SQLite file by default,
+    # or in Postgres::Store. The SQL here is valid in both.
     def initialize(config, clock: -> { Time.now }, store: nil)
       @config = config
       @clock = clock
@@ -36,7 +31,7 @@ module ShopifyLedger
     # Returns the shop's checkpoint after finishing any interrupted window and
     # then one fresh window ending now.
     def run(shop)
-      @storage = @store || SqliteStore.new(@config.database_for(shop))
+      @storage = @store || Storage::Store.new(@config.database_for(shop))
       admin = Admin.new(@config, shop)
       loop do
         run = open_run(shop)
