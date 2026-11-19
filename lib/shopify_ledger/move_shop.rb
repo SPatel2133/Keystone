@@ -107,7 +107,7 @@ module ShopifyLedger
       mode = stat.mode & 0o7777
       data.fetch("shops").fetch(shop)["database"] = to
       temporary = "#{config_path}.move-#{Process.pid}"
-      File.open(temporary, "w", mode) do |file|
+      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
         file.write(JSON.pretty_generate(data))
         file.flush
         file.fsync

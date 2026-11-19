@@ -335,4 +335,20 @@ class ShopifyShopRoutingTest < Minitest::Test
       assert_equal 0o640, File.stat(config_path).mode & 0o7777
     end
   end
+
+  def test_move_keeps_temporary_config_private_during_chown
+    ShopifyFixture.run do |run|
+      route(run)
+      config_path = File.join(File.dirname(run.database), "config.json")
+      File.chmod(0o640, config_path)
+      temporary_mode = nil
+
+      File.stub(:chown, ->(_uid, _gid, temporary) { temporary_mode = File.stat(temporary).mode & 0o7777 }) do
+        ShopifyLedger::MoveShop.switch(config_path, ALPHA, "eu")
+      end
+
+      assert_equal 0o600, temporary_mode
+      assert_equal 0o640, File.stat(config_path).mode & 0o7777
+    end
+  end
 end
