@@ -14,13 +14,14 @@ module ShopifyLedger
 
     class Refused < StandardError; end
 
-    def initialize(config)
+    def initialize(config, store: nil)
       @config = config
+      @store = store
     end
 
     def list(shop, state, limit: LIMIT)
       condition = STATES.fetch(state) { raise ArgumentError, "state must be one of #{STATES.keys.join(', ')}" }
-      Storage.new(@config.database_for(shop)).connect do |db|
+      store(shop).connect do |db|
         db.execute(<<~SQL, [shop, limit]).map { |row| describe(row) }
           SELECT #{COLUMNS} FROM inbox WHERE shop = ? AND #{condition} ORDER BY id LIMIT ?
         SQL
@@ -30,8 +31,9 @@ module ShopifyLedger
     # Makes one parked or backing-off delivery immediately eligible with a fresh
     # attempt budget. Processed deliveries are refused: their effects are final.
     def retry(shop, webhook_id)
-      Storage.new(@config.database_for(shop)).connect do |db|
-        Storage.transaction(db) do
+      store = store(shop)
+      store.connect do |db|
+        store.transaction(db) do
           row = db.get_first_row("SELECT #{COLUMNS} FROM inbox WHERE shop = ? AND webhook_id = ?", [shop, webhook_id])
           raise Refused, "delivery not found" unless row
           raise Refused, "delivery already processed" if row[4] == 1
@@ -49,6 +51,8 @@ module ShopifyLedger
               "received_at, last_attempt_at, processed_at, requeues, last_error"
 
     private
+
+    def store(shop) = @store || Storage::Store.new(@config.database_for(shop))
 
     def describe(row)
       webhook_id, topic, order_id, attempts, processed, parked_at, next_attempt_at,

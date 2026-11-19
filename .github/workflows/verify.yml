@@ -47,4 +47,5 @@ jobs:
           "$GITHUB_WORKSPACE/bin/inventory-demo"
           "$GITHUB_WORKSPACE/bin/shopify-demo"
           "$GITHUB_WORKSPACE/bin/shopify-ops-demo"
+          "$GITHUB_WORKSPACE/bin/shopify-demo" --evidence > /dev/null
           "$GITHUB_WORKSPACE/test/whiteboard"

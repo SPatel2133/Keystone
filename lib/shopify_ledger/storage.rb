@@ -158,6 +158,21 @@ module ShopifyLedger
       end
     end
 
+    # The SQLite side of the store interface that Reconciliation and Status use;
+    # Postgres::Store is the other side.
+    Store = Struct.new(:path) do
+      def connect(&block) = Storage.new(path).connect(&block)
+      def transaction(db, &block) = Storage.transaction(db, &block)
+
+      # One read transaction, so every count in a report comes from one snapshot.
+      def read(db)
+        db.transaction(:deferred)
+        yield
+      ensure
+        db.rollback if db.transaction_active?
+      end
+    end
+
     def self.transaction(db, before_commit: nil, after_commit: nil)
       db.execute("BEGIN IMMEDIATE")
       begin

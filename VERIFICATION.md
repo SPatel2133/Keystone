@@ -155,9 +155,73 @@ The fuzzer's `move_shop` operation crashes after the copy or after the switch. I
 
 After the fixes, the same run had 0 failures in 27 s.
 
+## Fuzzing the PostgreSQL worker
+
+| Run | Operations | Failures | Time |
+| --- | --- | --- | --- |
+| `bin/shopify-fuzz --postgres --seed 300000 --runs 500 --steps 300` | 150,000 | 0 | 330.8 s |
+| `--postgres --processes --seed 100 --runs 20 --steps 150` (52 concurrent multi-machine drains, 72 workers SIGKILLed mid-fetch) | 3,000 | 0 | 42.8 s |
+| `--postgres --seed 400000 --runs 500 --steps 300`, after reconciliation was ported (7,522 reconciles, 4,492 with a failing page) | 150,000 | 0 | 585.7 s |
+
+## Full-feature SQLite campaign
+
+`bin/shopify-fuzz --seed 500000 --runs 1000 --steps 300` was run at the hardening head. Its operations include shop moves, crashing at either seam (9,022), real Admin read timeouts, every payment kind and status, stale Admin reads (9,205) and reconciliation runs with a failing page (9,079). It performed 300,000 operations with 0 failures in 1,841.5 s (30 min 42 s wall), with a max RSS of 188 MB.
+
+`bin/shopify-fuzz --processes --seed 600000 --runs 100 --steps 300` performed 30,000 operations with 0 failures in 366.9 s. They included 554 rounds of 2–4 concurrent `--drain` processes, 594 workers SIGKILLed mid-fetch and 913 shop moves.
+
+`bin/shopify-fuzz --postgres --processes --seed 700000 --runs 100 --steps 300` performed 30,000 operations with 0 failures in 498.0 s. They included 588 rounds of concurrent multi-machine `bin/shopify-pg-worker --drain` processes, 567 workers SIGKILLed mid-fetch and 1,433 reconciliations.
+
+## Fresh-clone run of the hardening branch
+
+`~/sprint/final.sh` was run against a fresh clone of `devin/1795087967-shopify-hardening` (3f5bb2d) in a path that contains a space. It ran `bin/check`, `bin/shopify-check` (with the PostgreSQL tests skipped, since no URL was set), repeated race tests, `bin/setup`, every demo (including the new ops-demo step 9), the whiteboard, both benchmark modes, both evidence commands, and the drain and ingest benchmarks. Afterwards the caller's ledger SHA was unchanged, and the script exited with `FINAL_EXIT=0`.
+
+The first attempt failed in `bin/shopify-demo --evidence`, with `Errno::EISDIR` on the new `test/support/shopify_fuzz/` directory. The evidence digest now covers nested source files and skips directories, and CI now runs that command too.
+
+## Found in review (PostgreSQL)
+
+Each bug got a regression test, which failed before its fix:
+- **`PG::UniqueViolation`** when two PostgreSQL workers apply the same order concurrently. Inserts are now `ON CONFLICT DO NOTHING RETURNING 1`, followed by a comparison with the winner's row.
+- **NULL `last_attempt_at`** on PostgreSQL completion.
+
+- **Operator retry overwritten by a stale failure.** On PostgreSQL, a failure that started before an operator retry parked the requeued delivery, because the worker lacked SQLite's attempts guard. `test_operator_retry_during_a_failing_fetch_is_not_overwritten_on_postgres` reported `parked` before the fix. Now the stale failure is dropped, the worker releases its lease and takes the next claim, which matches the SQLite worker; afterwards `bin/shopify-check` passed 90 runs / 952 assertions.
+
+Afterwards, `bin/shopify-check` passed 88 runs / 948 assertions, and `--postgres --processes --seed 21 --runs 10 --steps 150` had 0 failures.
+
+## Found by fuzzer (PostgreSQL deadlock)
+
+The PostgreSQL fuzzer now runs two workers at once on separate connections on every third worker step. With that change, `--postgres --seed 31 --runs 20 --steps 200` hung.
+
+`test_concurrent_workers_on_the_same_orders_never_deadlock` uses 4 threads on 20 orders × 3 deliveries. It raised `PG::TRDeadlockDetected` in 3 of 3 runs before the fix. Completion locked only its own inbox row, then updated the other same-order rows. It now locks every same-order row up to the fence in ID order first.
+
+As a mutation check, I reverted only the lock-ordering fix and ran seeds 31–50 (200 steps each) one by one. 11 of the 20 failed with `concurrent worker raised PG::TRDeadlockDetected`, each within 1–2.3 s, and the fix was then restored. The original campaign "hang" was shrinking working through many failing runs. Runs are now also bounded by `SHOPIFY_FUZZ_RUN_TIMEOUT` (default 120 s).
+
+A longer campaign after the fix, `--postgres --seed 800000 --runs 300 --steps 300` with concurrent workers, performed 90,000 operations with 0 failures in 666.9 s.
+
+After the fix, the test passed 3 of 3 runs, the seed-31 campaign had 0 failures in 31.3 s, and `bin/shopify-check` passed 89 runs / 950 assertions.
+
+## Drain throughput: SQLite and PostgreSQL
+
+`ruby benchmark/shopify_drain.rb ORDERS 50 UPDATES [sqlite|postgres]` uses a fake Admin API that adds 50 ms of latency. Local Docker `postgres:16-alpine` was used, and a fuzz campaign was running on the same machine at the time.
+
+| Backend, deliveries | 1 worker | 2 workers | 4 workers | 8 workers | Admin fetches (1/2/4/8 workers) |
+| --- | --- | --- | --- | --- | --- |
+| SQLite, 200 orders × 1 update | 17.2/s | 33.3/s | 57.6/s | 115.9/s | 200 / 200 / 200 / 200 |
+| PostgreSQL, 200 orders × 1 update | 17.6/s | 34.5/s | 65.1/s | 117.5/s | 200 / 200 / 200 / 200 |
+| PostgreSQL, 100 orders × 3 updates (coalescing) | 50.8/s | 99.2/s | 171.3/s | 278.3/s | 100 / 100 / 102 / 108 |
+
+Every run completed all deliveries with the exact expected net. Throughput is limited by Admin latency, not by the database.
+
+## Real Shopify development store
+
+Run on 2026-11-19 against a Shopify development store through a custom app (Admin API `2026-10`). The token and webhook secret stayed in a local config outside the repository.
+
+- **Reconciliation:** 8 orders with 13 transactions: 5 sales, 4 authorizations (2 captured, one of them partially; 1 voided; 1 left open) and 2 refunds (partial and full). `bin/reconcile` stored 9 money-moving transactions. Totals matched Shopify's transactions exactly: USD collected `290.23`, refunded `94.99`, net `195.24`. A second run changed nothing.
+- **Live webhooks:** `orders/updated` and `refunds/create` subscriptions pointed at `bin/shopify-webhook` through a temporary Cloudflare quick tunnel. Shopify signed requests with the app's client secret, and HMAC verification accepted them. 6 deliveries for 3 new orders (sale, authorization then full capture, sale then partial refund) were processed on the first attempt with no failures. Those orders' totals equal their payments. Afterwards 11 orders matched Shopify exactly: collected `422.72`, refunded `104.99`, net `317.73`, with 4 transactions sourced from webhooks.
+- **Limit of the test store:** Shopify's manual payment gateway accepts only one capture per authorization, so multiple partial captures could not be produced on a real store. They are covered by the fake-Admin tests.
+
 ## Not run
 
-PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
+Multi-host workers were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
 
 # Local verification on Ruby 3.4
 

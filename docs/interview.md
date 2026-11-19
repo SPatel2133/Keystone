@@ -44,7 +44,7 @@ Run `test/whiteboard` from the project root to compare the deliberately broken s
 - The real SIGKILL and multi-process paths are behind `--processes`, because each one spawns Ruby.
 - The oracle is checked by a planted wrong amount, which must be caught and shrunk.
 
-*At Shopify scale:* the same model would drive a deterministic simulation of many pods and a real PostgreSQL. The faults injected would include network partitions between the worker and the database, not only API faults.
+*At Shopify scale:* the model already runs against a real PostgreSQL (`--postgres`). The next step would be a deterministic simulation of many pods. The faults injected would include network partitions between the worker and the database, not only API faults.
 
 **Payment statuses and currencies.** *What:* every Shopify transaction is kept in `payment_events` with its latest status, and only `SUCCESS` sales, captures and refunds reach the money table. *Why:* a pending capture must not count, but the operator still needs to see it. An authorization must be visible to tell whether captures exceed it. *Tradeoffs:*
 - Status only moves from an open status to a final one. A stale fetch that shows an older open status is ignored rather than rejected, because two workers can fetch the same order at different moments.
@@ -54,9 +54,27 @@ Run `test/whiteboard` from the project root to compare the deliberately broken s
 **PostgreSQL workers.** *What:* `bin/shopify-pg-worker` claims deliveries with `FOR UPDATE SKIP LOCKED` and a 60 s lease, then applies the shared payment rules through a small adapter. *Why:* SQLite claims rely on PID liveness, which only works on one host. SKIP LOCKED lets many machines pick different rows without waiting on each other. *Tradeoffs:*
 - A dead worker's delivery waits up to the lease length before another worker takes it.
 - Applying payments is idempotent, so a worker whose lease expired mid-fetch can at worst repeat a fetch. It cannot double-count.
-- Only the worker path is ported. Ingest, reconciliation and the operator tools would follow the same adapter.
+- Ingest (`SHOPIFY_LEDGER_INBOX=postgres`), the worker and reconciliation (through `Postgres::Store`) are ported. The operator tools still read SQLite.
 
 **Moving a shop between databases.** *What:* `bin/shopify-move-shop` copies and verifies, then switches the route, then cleans up. Each step is idempotent, and a crash test covers each seam. *Why:* sharding by shop means a shop eventually has to move without losing or double-counting money. *Tradeoffs:*
 - The route lives in the config file, so running processes must be restarted, and ingest must pause during the move.
 - With a central routing table and a per-shop write fence, the move could run online.
 - Cleanup refuses rather than merging when the old copy changed. Merging two inboxes automatically is exactly where silent loss would hide.
+
+**What the fuzzer found (a story to tell).** When shop moves were added to the fuzzer's operations, the second campaign failed within seconds. The shrinker cut it down to a move that crashed after copying, followed by ordinary work on the old route, then a settle.
+- **First bug:** cleanup compared the orphan copy with the routed copy for exact equality, so a copy that had gone stale was refused forever. The fix asks a different question: does the old database hold any delivery or payment that the routed copy lacks? A stale copy loses nothing; an unknown delivery needs an operator.
+- **Second bug:** a worker draining the old database kept processing the stale copy's deliveries. Claims now skip shops routed elsewhere.
+
+Each bug got a focused regression test before the fix. *Lesson:* the example tests covered each crash seam on its own. The bugs needed a crash followed by more normal traffic, which is exactly the combination a random sequence produces and a hand-written test does not.
+
+**A bug that SQLite hid.** On SQLite, `BEGIN IMMEDIATE` lets only one writer run at a time, so applying an order's payments never raced. On PostgreSQL at READ COMMITTED, two workers completing different deliveries of the same order both inserted the same transaction row, and the second got `PG::UniqueViolation`. The fix keeps the code portable: insert with `ON CONFLICT DO NOTHING RETURNING 1`, and when nothing was inserted, compare against the row that won. Conflicting facts still raise. *Lesson:* porting to a database with more concurrency moves the serialization point. The regression test holds one transaction open with a second connection blocked behind it, so the race happens every run instead of one run in a thousand.
+
+**A deadlock the fuzzer found.** After the fuzzer started running two PostgreSQL workers at once, one seed hung. Each completion locked its own inbox row and then coalesced the other rows of the same order, so two workers could each hold one row and wait for the other's. The fix is classic lock ordering: lock every same-order row up to the fence in ID order (`ORDER BY id FOR UPDATE`) before applying, so the second completion waits and then sees its row already processed. A four-thread regression test hit `PG::TRDeadlockDetected` in 3 of 3 runs before the fix.
+
+**Porting means porting the guards too.** The SQLite worker only records a failure when `attempts` still matches what it claimed, so a failure that started before an operator retry cannot park the retried delivery. The first PostgreSQL worker dropped that predicate. A review that compared the two workers' `UPDATE` statements line by line found it, and the SQLite race test, rewritten for PostgreSQL, failed with `parked` until the guard came back. Since then, every PostgreSQL write path has been checked against its SQLite twin.
+
+## Notes from the real-store run
+
+- Shopify signs webhooks registered through the Admin API with the app's client secret, so that secret, not the Admin access token, is the HMAC key in the ledger config.
+- Against a live development store, `bin/reconcile` matched Shopify's totals to the cent, and a second run changed nothing.
+- Shopify's manual test gateway accepts only one capture per authorization, so multiple partial captures are tested against the fake Admin API and in the fuzzer instead.

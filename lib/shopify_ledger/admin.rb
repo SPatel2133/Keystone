@@ -58,7 +58,6 @@ module ShopifyLedger
     BASE_DELAY = 0.25
     MAX_DELAY = 2.0
     OPEN_TIMEOUT = 5
-    READ_TIMEOUT = 10
     WRITE_TIMEOUT = 5
 
     def self.delay(attempt, retry_after = nil)
@@ -72,6 +71,7 @@ module ShopifyLedger
       @endpoint = URI(settings.fetch("endpoint").to_s)
       @token = settings.fetch("token")
       @attempts = config.api_attempts
+      @read_timeout = config.api_read_timeout
       @sleeper = sleeper
     end
 
@@ -146,7 +146,7 @@ module ShopifyLedger
       http = Net::HTTP.new(@endpoint.hostname, @endpoint.port, nil)
       http.use_ssl = @endpoint.scheme == "https"
       http.open_timeout = OPEN_TIMEOUT
-      http.read_timeout = READ_TIMEOUT
+      http.read_timeout = @read_timeout
       http.write_timeout = WRITE_TIMEOUT
 
       post = Net::HTTP::Post.new(@endpoint.request_uri)

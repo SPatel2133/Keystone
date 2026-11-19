@@ -1,7 +1,8 @@
 #!/usr/bin/env ruby
 # Deterministic operator walkthrough against a local fake Shopify Admin API and
 # a disposable database: a poison delivery is parked and recovered, a failed
-# reconciliation resumes at its saved page, and audit explains the totals.
+# reconciliation resumes at its saved page, audit explains the totals, and a
+# shop move killed halfway is finished by rerunning it.
 require_relative "../lib/event_consumer/bundle"
 require_relative "../test/support/shopify_scenarios"
 
@@ -82,4 +83,16 @@ ShopifyFixture.run do |run|
   check(copy.fetch("totals").fetch(ALPHA) == run.summary.fetch("totals"), "backup totals match live totals")
   puts "8. bin/shopify-backup wrote a verified online snapshot (#{copy.fetch("transactions")} transactions, " \
        "integrity #{copy.fetch("integrity")}) whose totals match the live ledger."
+
+  config_path = File.join(File.dirname(run.database), "config.json")
+  File.write(config_path, JSON.generate(JSON.parse(File.read(config_path)).merge("databases" => { "eu" => "eu.sqlite3" })))
+  before = run.summary.fetch("totals")
+  _stdout, _stderr, crashed = run.command("test/support/shopify-move-shop-with-hooks", ALPHA, "--to", "eu", seam: "after_copy")
+  check(crashed.termsig == 9, "move killed after the copy")
+  check(run.summary.fetch("totals") == before, "the old route still serves after the crash")
+  moved = run.json("bin/shopify-move-shop", ALPHA, "--to", "eu")
+  check(moved.fetch("totals") == before && run.summary.fetch("totals") == before, "totals unchanged by the move")
+  check(run.read("SELECT COUNT(*) FROM transactions").first.first.zero?, "old database cleaned up")
+  puts "9. bin/shopify-move-shop was SIGKILLed after copying the shop to eu; the old route kept serving. Rerunning it " \
+       "switched the route and cleaned up (#{moved.fetch("copied").fetch("transactions")} transactions, totals unchanged)."
 end

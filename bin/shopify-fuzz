@@ -5,8 +5,8 @@
 require_relative "../lib/event_consumer/bundle"
 require_relative "../test/support/shopify_fuzz"
 
-usage = "usage: bin/shopify-fuzz [--seed N] [--steps N] [--runs N] [--processes] | --replay FILE"
-options = { seed: Random.new_seed % 1_000_000, steps: 200, runs: 25, processes: false }
+usage = "usage: bin/shopify-fuzz [--seed N] [--steps N] [--runs N] [--processes | --postgres] | --replay FILE"
+options = { seed: Random.new_seed % 1_000_000, steps: 200, runs: 25, processes: false, backend: :sqlite }
 arguments = ARGV.dup
 until arguments.empty?
   case arguments.shift
@@ -14,6 +14,7 @@ until arguments.empty?
   when "--steps" then options[:steps] = Integer(arguments.shift || "", 10, exception: false)
   when "--runs" then options[:runs] = Integer(arguments.shift || "", 10, exception: false)
   when "--processes" then options[:processes] = true
+  when "--postgres" then options[:backend] = :postgres
   when "--replay" then options[:replay] = arguments.shift
   else abort usage
   end
@@ -21,13 +22,14 @@ end
 abort usage unless options.values_at(:seed, :steps, :runs).all? { |value| value.is_a?(Integer) && value >= 0 }
 
 if options[:replay]
-  ops = JSON.parse(File.read(options[:replay])).fetch("ops")
-  failure = ShopifyFuzz.execute(ops)
+  record = JSON.parse(File.read(options[:replay]))
+  ops = record.fetch("ops")
+  failure = ShopifyFuzz.execute(ops, backend: record.fetch("backend", "sqlite").to_sym)
   puts JSON.generate(replayed: options[:replay], operations: ops.size - 1, failure: failure)
   exit(failure ? 1 : 0)
 end
 
 report = ShopifyFuzz.campaign(seed: options[:seed], runs: options[:runs], steps: options[:steps],
-                              processes: options[:processes], directory: File.expand_path("../tmp", __dir__))
+                              processes: options[:processes], backend: options[:backend], directory: File.expand_path("../tmp", __dir__))
 puts JSON.pretty_generate(report.merge("failures" => report["failures"].map { |failure| failure.except("ops") }))
 exit(report["failures"].empty? ? 0 : 1)

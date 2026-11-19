@@ -39,7 +39,7 @@ flowchart LR
 
 Run `bin/shopify-demo` for the merchant example: a CAD 100.00 sale and CAD 25.00 refund produce CAD 75.00 net after crash recovery or reconciliation. Both demos use disposable databases.
 
-[Machine trace](evidence.jsonl) · [90-second whiteboard walkthrough](docs/interview.md) · [Benchmark](#benchmark) · [Verification](VERIFICATION.md)
+[Machine trace](evidence.jsonl) · [90-second whiteboard walkthrough](docs/interview.md) · [Architecture and invariants](docs/architecture.md) · [Benchmark](#benchmark) · [Verification](VERIFICATION.md)
 
 ## Shopify order and refund ledger
 
@@ -48,6 +48,10 @@ consumer available through `bin/ledger`. Run `bin/shopify-check` for the
 black-box Shopify suite and `bin/shopify-demo` for the replay and reconciliation
 demo. Both use disposable databases and a local fake Shopify GraphQL server.
 They require no Shopify account, credentials, or webhook tunnel.
+
+### Verified against a real Shopify store
+
+The ledger also ran against a Shopify development store with 11 orders. Live `orders/updated` and `refunds/create` webhooks arrived through a temporary tunnel, and `bin/reconcile` filled in the rest. The stored totals matched Shopify exactly: USD collected `422.72`, refunded `104.99`, net `317.73`. Shopify's manual test gateway allows only one capture per authorization, so multiple partial captures are covered by the fake-Admin tests and the fuzzer instead ([details](VERIFICATION.md#real-shopify-development-store)).
 
 ```sh
 bundle check
@@ -63,8 +67,10 @@ operating commands. A poison delivery is parked, flagged by
 `bin/shopify-status` and recovered with `bin/shopify-deliveries retry`. A
 reconciliation run fails on page 2 and then resumes at page 2.
 `bin/shopify-audit` traces each total to the delivery or reconciliation run
-that recorded it. Finally, `bin/shopify-backup` writes a verified online
-snapshot whose totals match the live ledger.
+that recorded it. `bin/shopify-backup` writes a verified online snapshot whose
+totals match the live ledger. Finally, `bin/shopify-move-shop` is SIGKILLed
+after copying the shop to another database. The old route keeps serving, and
+rerunning the command finishes the move with unchanged totals.
 
 See the [Shopify verification runs](VERIFICATION.md#shopify-verification) and
 [recorded demo evidence](shopify-evidence.jsonl).
@@ -138,7 +144,9 @@ gets its own fetch. Parked deliveries are never completed this way.
 Each Admin API request is retried inside one attempt on HTTP 429, 500, 502,
 503 and 504, on GraphQL `THROTTLED`, and on connection errors. Waits are 0.25 s
 then doubling, and `Retry-After` is honoured up to 2 s. Set `api_attempts`
-(1 to 10, default 3) in the configuration to change this. Every query is
+(1 to 10, default 3) in the configuration to change this, and
+`api_read_timeout` (0.05 to 60 seconds, default 10) to change how long a request
+waits for a response. A read timeout counts as a connection error. Every query is
 read-only, so retrying one never changes Shopify state. Malformed or
 incomplete responses are not retried; they count as a failed attempt. The client
 also reads GraphQL query cost from `extensions.cost`. A `THROTTLED` retry waits
@@ -217,8 +225,12 @@ on the order.
 
 ### PostgreSQL backend (workers on several machines)
 
-`bin/shopify-pg-worker --once | --drain | summary SHOP` runs the same payment
-rules (`Payments.apply`, `observe`, `review`) against PostgreSQL. It needs
+`bin/shopify-pg-worker --once | --drain | reconcile SHOP | status [SHOP...] | summary SHOP | audit SHOP [--order GID] | deliveries list|retry ...`
+runs the same code against PostgreSQL as against SQLite: the payment rules
+(`Payments.apply`, `observe`, `review`), resumable reconciliation, the status
+report, audit, and delivery listing and retry. Everything except the payment
+rules goes through `Postgres::Store`. Reports read one
+`REPEATABLE READ READ ONLY` snapshot. It needs
 `SHOPIFY_LEDGER_POSTGRES_URL` and the optional gem group
 (`bundle config set --local with postgres && bundle install`).
 
@@ -230,12 +242,26 @@ outside any transaction. Completion locks the inbox row (`FOR UPDATE`) and
 commits the payments together with every same-order delivery up to the
 pre-fetch fence.
 
+`ruby benchmark/shopify_drain.rb ORDERS LATENCY_MS UPDATES postgres` measures
+PostgreSQL drains the same way as the SQLite drain benchmark.
+
 `test/shopify/postgres_test.rb` runs when `SHOPIFY_LEDGER_POSTGRES_URL` is set,
 and CI provides a `postgres:16` service container. Four workers with different
 machine IDs drain 40 deliveries with exactly 40 Admin fetches. The tests also
 cover workers SIGKILLed before and after commit, and backoff then parking.
 
-Webhook ingest, reconciliation and the operator commands still use SQLite.
+`SHOPIFY_LEDGER_INBOX=postgres bin/shopify-webhook` stores deliveries in the
+same PostgreSQL inbox, still after HMAC verification and before the `200`.
+Requests share one connection behind a mutex. A redelivery with a different
+topic or order gets `409`, and a database error returns `503` with
+`Retry-After`. If the server drops the connection, that one delivery gets `503`
+and the connection is reset for the next one. The variable is separate from the URL, so a configured URL alone
+never moves ingest. Backup, maintenance and shop moves are SQLite-only. On
+PostgreSQL those jobs belong to the database's own tools: `pg_dump` takes one
+consistent snapshot while workers keep writing, `VACUUM` and autovacuum replace
+`bin/shopify-maintain`, and logical replication or a per-shop `COPY` would
+replace a file-to-file move. The project does not wrap them, because they are
+not tested here.
 
 ### Routing shops to databases and moving a shop
 
@@ -271,19 +297,31 @@ processes keep the route they loaded. Shopify retries webhooks that get no
 ### Randomized crash testing
 
 `bin/shopify-fuzz [--seed N] [--steps N] [--runs N] [--processes]` expands each
-seed into a random sequence of operations, then checks the ledger against a
-reference model of the fake Admin API's ground truth.
+seed into a random sequence of operations over two or three shops, two
+currencies and 1–20 orders. It then checks the ledger against a reference model
+of the fake Admin API's ground truth.
 
 The operations include:
 - new, duplicate and refund deliveries;
 - workers that crash before or after commit, and claims left by dead workers;
-- Admin API faults: 429, 500, 503 and `THROTTLED`;
+- Admin API faults: 429, 500, 503, `THROTTLED` and real read timeouts (the fuzzer sets `api_read_timeout` to 0.2 s);
 - order changes, with or without a webhook;
 - operator retries, backups and maintenance;
 - reconciliation runs whose pages fail.
 
 `--processes` adds real `--drain` processes running concurrently, and workers
 SIGKILLed mid-fetch.
+
+`--postgres` runs the same operation lists against the PostgreSQL worker and
+reconciliation. It needs `SHOPIFY_LEDGER_POSTGRES_URL`. Backups, maintenance
+and shop moves are SQLite-only, so on PostgreSQL they are no-ops. A dead
+worker's claim is a lease held by another machine, and "time passes" expires
+leases. Every third worker step runs two workers at once on separate
+connections, so completions of one order race inside PostgreSQL. A run that
+does not finish within `SHOPIFY_FUZZ_RUN_TIMEOUT` seconds (default 120) counts
+as a failure, so a hang is shrunk and saved for replay like any other bug.
+With `--processes` it also starts 2–4 `bin/shopify-pg-worker --drain`
+processes with different machine IDs, and SIGKILLs a worker mid-fetch.
 
 After every step it checks that:
 1. No `(shop, transaction_id)` is stored twice.
@@ -362,7 +400,7 @@ Doctor supports the original ledger's rollback journal. It reports a missing led
 
 `ruby benchmark/shopify_operations.rb` times Shopify worker selection and `bin/shopify-status` against 50,000 parked and 50,000 processed deliveries ([results](VERIFICATION.md#measured-boundary-parked-history)).
 
-Run `bin/benchmark --full` for the 100,000-event workload, or `bin/benchmark --smoke` to check the same paths quickly. This single-writer sample used an Apple M5 with 16 GiB, Ruby 3.4.13 and SQLite 3.54.1.
+Run `bin/benchmark --full` for the 100,000-event workload, or `bin/benchmark --smoke` to check the same paths quickly. This single-writer sample used an Apple M5 with 16 GiB, Ruby 3.4.13 and SQLite 3.54.1. On Linux (Ubuntu x86_64), `bin/benchmark --full` ran ordered inserts at 917 ack/s (p50 0.96 ms, p95 1.59 ms) and identical retries at 6,516/s ([results](VERIFICATION.md#final-integrated-run)).
 
 | Measured boundary | Samples | Throughput | p50 / p95 |
 | --- | ---: | ---: | ---: |
@@ -382,7 +420,7 @@ With 257 free pages, the test database shrank from 1,064,960 to 12,288 bytes. A 
 
 ## Setup and original demo
 
-Tested on macOS arm64 with Ruby 3.4.13, Bundler 4.1.0, sqlite3 gem 2.10.2, and Minitest 5.27.0.
+Tested on macOS arm64 and Linux (Ubuntu) x86_64 with Ruby 3.4.13, Bundler 4.1.0, sqlite3 gem 2.10.2 and SQLite 3.54.1. CI also runs the PostgreSQL tests against PostgreSQL 16.
 
 Linux CI is configured for Ubuntu 22.04. To try the sequence CLI as an installed RubyGem, see the [local gem installation](VERIFICATION.md#reproduce-the-isolated-gem-install).
 

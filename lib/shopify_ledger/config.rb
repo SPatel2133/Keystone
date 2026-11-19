@@ -11,7 +11,9 @@ module ShopifyLedger
 
     DEFAULT_API_ATTEMPTS = 3
 
-    attr_reader :database, :secret, :max_attempts, :api_attempts
+    DEFAULT_API_READ_TIMEOUT = 10
+
+    attr_reader :database, :secret, :max_attempts, :api_attempts, :api_read_timeout
 
     def self.load
       path = File.expand_path(ENV.fetch("SHOPIFY_LEDGER_CONFIG"))
@@ -32,6 +34,10 @@ module ShopifyLedger
       @api_attempts = data.fetch("api_attempts", DEFAULT_API_ATTEMPTS)
       unless @api_attempts.is_a?(Integer) && @api_attempts.between?(1, 10)
         raise ArgumentError, "api_attempts must be an integer from 1 to 10"
+      end
+      @api_read_timeout = data.fetch("api_read_timeout", DEFAULT_API_READ_TIMEOUT)
+      unless @api_read_timeout.is_a?(Numeric) && @api_read_timeout.between?(0.05, 60)
+        raise ArgumentError, "api_read_timeout must be a number of seconds from 0.05 to 60"
       end
       named = data.fetch("databases", {})
       unless named.is_a?(Hash) && named.all? { |name, path| name.is_a?(String) && path.is_a?(String) && !path.empty? }

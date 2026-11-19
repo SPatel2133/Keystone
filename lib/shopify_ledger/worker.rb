@@ -101,7 +101,7 @@ module ShopifyLedger
     # Upper bound on one attempt's Admin fetch: open, write and read timeouts
     # plus the capped retry delay per request, with slack.
     def lease
-      @config.api_attempts * (Admin::OPEN_TIMEOUT + Admin::WRITE_TIMEOUT + Admin::READ_TIMEOUT + Admin::MAX_DELAY) + 10
+      @config.api_attempts * (Admin::OPEN_TIMEOUT + Admin::WRITE_TIMEOUT + @config.api_read_timeout + Admin::MAX_DELAY) + 10
     end
 
     def process(delivery, before_commit, after_commit)

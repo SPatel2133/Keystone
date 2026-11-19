@@ -9,6 +9,8 @@ module ShopifyFixture
   ROOT = File.expand_path("../..", __dir__).freeze
   ALPHA = "alpha.myshopify.com".freeze
   BETA = "beta.myshopify.com".freeze
+  GAMMA = "gamma.myshopify.com".freeze
+  SHOPS = [ALPHA, BETA, GAMMA].freeze
   ORDER = "gid://shopify/Order/101".freeze
   OTHER_ORDER = "gid://shopify/Order/102".freeze
   SALE = "gid://shopify/OrderTransaction/201".freeze
@@ -69,7 +71,7 @@ module ShopifyFixture
 
     def respond(request, response)
       raise "Expected POST #{PATH}" unless request.request_method == "POST" && request.path == PATH
-      shop = [ALPHA, BETA].find { |candidate| request["x-shopify-access-token"] == "fake-token-for-#{candidate}" }
+      shop = SHOPS.find { |candidate| request["x-shopify-access-token"] == "fake-token-for-#{candidate}" }
       raise "Unrecognized fake shop token" unless shop
 
       query = JSON.parse(request.body)
@@ -121,8 +123,8 @@ module ShopifyFixture
                                                     "SHOPIFY_LEDGER_PORT" => "0")
     end
 
-    def configure(**settings)
-      shops = [ALPHA, BETA].each_with_object({}) do |shop, configs|
+    def configure(shops: [ALPHA, BETA], **settings)
+      shops = shops.each_with_object({}) do |shop, configs|
         configs[shop] = { endpoint: admin.endpoint, token: "fake-token-for-#{shop}" }
       end
       # Most scenarios count exact Admin requests, so in-request retries are opt-in.
