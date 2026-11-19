@@ -233,6 +233,9 @@ outside any transaction. Completion locks the inbox row (`FOR UPDATE`) and
 commits the payments together with every same-order delivery up to the
 pre-fetch fence.
 
+`ruby benchmark/shopify_drain.rb ORDERS LATENCY_MS UPDATES postgres` measures
+PostgreSQL drains the same way as the SQLite drain benchmark.
+
 `test/shopify/postgres_test.rb` runs when `SHOPIFY_LEDGER_POSTGRES_URL` is set,
 and CI provides a `postgres:16` service container. Four workers with different
 machine IDs drain 40 deliveries with exactly 40 Admin fetches. The tests also

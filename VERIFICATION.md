@@ -161,6 +161,19 @@ After the fixes, the same run had 0 failures in 27 s.
 | --- | --- | --- | --- |
 | `bin/shopify-fuzz --postgres --seed 300000 --runs 500 --steps 300` | 150,000 | 0 | 330.8 s |
 | `--postgres --processes --seed 100 --runs 20 --steps 150` (52 concurrent multi-machine drains, 72 workers SIGKILLed mid-fetch) | 3,000 | 0 | 42.8 s |
+| `--postgres --seed 400000 --runs 500 --steps 300`, after reconciliation was ported (7,522 reconciles, 4,492 with a failing page) | 150,000 | 0 | 585.7 s |
+
+## Drain throughput: SQLite and PostgreSQL
+
+`ruby benchmark/shopify_drain.rb ORDERS 50 UPDATES [sqlite|postgres]` uses a fake Admin API that adds 50 ms of latency. Local Docker `postgres:16-alpine` was used, and a fuzz campaign was running on the same machine at the time.
+
+| Backend, deliveries | 1 worker | 2 workers | 4 workers | 8 workers | Admin fetches (1/2/4/8 workers) |
+| --- | --- | --- | --- | --- | --- |
+| SQLite, 200 orders × 1 update | 17.2/s | 33.3/s | 57.6/s | 115.9/s | 200 / 200 / 200 / 200 |
+| PostgreSQL, 200 orders × 1 update | 17.6/s | 34.5/s | 65.1/s | 117.5/s | 200 / 200 / 200 / 200 |
+| PostgreSQL, 100 orders × 3 updates (coalescing) | 50.8/s | 99.2/s | 171.3/s | 278.3/s | 100 / 100 / 102 / 108 |
+
+Every run completed all deliveries with the exact expected net. Throughput is limited by Admin latency, not by the database.
 
 ## Not run
 
