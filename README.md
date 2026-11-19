@@ -252,7 +252,12 @@ Requests share one connection behind a mutex. A redelivery with a different
 topic or order gets `409`, and a database error returns `503` with
 `Retry-After`. If the server drops the connection, that one delivery gets `503`
 and the connection is reset for the next one. The variable is separate from the URL, so a configured URL alone
-never moves ingest. Backup, maintenance and shop moves are SQLite-only.
+never moves ingest. Backup, maintenance and shop moves are SQLite-only. On
+PostgreSQL those jobs belong to the database's own tools: `pg_dump` takes one
+consistent snapshot while workers keep writing, `VACUUM` and autovacuum replace
+`bin/shopify-maintain`, and logical replication or a per-shop `COPY` would
+replace a file-to-file move. The project does not wrap them, because they are
+not tested here.
 
 ### Routing shops to databases and moving a shop
 
