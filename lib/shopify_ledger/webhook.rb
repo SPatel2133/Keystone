@@ -15,6 +15,11 @@ module ShopifyLedger
     def initialize(config, after_commit: nil)
       @config = config
       @inboxes = Hash.new { |cache, path| cache[path] = Inbox.new(Storage.new(path)) }
+      # SHOPIFY_LEDGER_INBOX=postgres sends every delivery to SHOPIFY_LEDGER_POSTGRES_URL.
+      if ENV["SHOPIFY_LEDGER_INBOX"] == "postgres"
+        require_relative "postgres"
+        @postgres = Postgres::Inbox.new(ENV.fetch("SHOPIFY_LEDGER_POSTGRES_URL"))
+      end
       @after_commit = after_commit
     end
 
@@ -59,13 +64,19 @@ module ShopifyLedger
       order_id = order_gid(topic, payload) if payload.is_a?(Hash)
       return respond(response, 400, "invalid_payload") unless order_id
 
-      @inboxes[@config.database_for(shop)].receive(shop: shop, webhook_id: webhook_id, topic: topic, order_id: order_id, after_commit: @after_commit)
+      (@postgres || @inboxes[@config.database_for(shop)]).receive(shop: shop, webhook_id: webhook_id, topic: topic, order_id: order_id, after_commit: @after_commit)
       respond(response, 200)
     rescue Inbox::IdentityConflict
       respond(response, 409, "delivery_id_conflict")
     rescue SQLite3::BusyException, SQLite3::LockedException
       response["Retry-After"] = "1"
       respond(response, 503, "storage_busy")
+    rescue StandardError => error
+      raise unless defined?(PG::Error) && error.is_a?(PG::Error)
+
+      # The delivery was not acknowledged, so Shopify retries it.
+      response["Retry-After"] = "1"
+      respond(response, 503, "storage_unavailable")
     end
 
     private

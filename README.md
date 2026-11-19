@@ -235,7 +235,12 @@ and CI provides a `postgres:16` service container. Four workers with different
 machine IDs drain 40 deliveries with exactly 40 Admin fetches. The tests also
 cover workers SIGKILLed before and after commit, and backoff then parking.
 
-Webhook ingest, reconciliation and the operator commands still use SQLite.
+`SHOPIFY_LEDGER_INBOX=postgres bin/shopify-webhook` stores deliveries in the
+same PostgreSQL inbox, still after HMAC verification and before the `200`.
+Requests share one connection behind a mutex. A redelivery with a different
+topic or order gets `409`, and a database error returns `503` with
+`Retry-After`. The variable is separate from the URL, so a configured URL alone
+never moves ingest. Reconciliation and the operator commands still use SQLite.
 
 ### Routing shops to databases and moving a shop
 

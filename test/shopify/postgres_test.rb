@@ -135,4 +135,24 @@ class ShopifyPostgresTest < Minitest::Test
     assert_empty report["failures"], JSON.pretty_generate(report["failures"])
     assert_operator report["operations"].fetch("kill_mid_fetch"), :>, 0
   end
+
+  def test_webhooks_ingest_into_postgres_end_to_end
+    ShopifyFixture.run do |run|
+      arrange_order(run, 101, "100.00")
+      ENV["SHOPIFY_LEDGER_INBOX"] = "postgres"
+      run.with_endpoint do
+        assert_equal 200, run.deliver("sale")
+        assert_equal 200, run.deliver("sale"), "a redelivery is acknowledged once stored"
+        assert_equal 409, run.deliver("sale", topic: "refunds/create"), "the same delivery ID cannot change identity"
+        assert_equal 401, run.deliver("forged", signature: "bad")
+      end
+      assert_equal [[ALPHA, "sale", ORDER]], @db.execute("SELECT shop, webhook_id, order_id FROM inbox")
+      refute File.exist?(run.database), "SQLite must not receive deliveries"
+      stdout, = worker(run, "--once")
+      assert_equal({ "status" => "processed" }, JSON.parse(stdout))
+      assert_equal "100.00", net(run)
+    ensure
+      ENV.delete("SHOPIFY_LEDGER_INBOX")
+    end
+  end
 end

@@ -2,6 +2,7 @@ require "json"
 require "socket"
 require_relative "admin"
 require_relative "config"
+require_relative "inbox"
 require_relative "log"
 require_relative "payments"
 
@@ -100,11 +101,36 @@ module ShopifyLedger
       end
     end
 
+    # Returns true for a new delivery. A redelivery must name the same topic
+    # and order, as with SQLite.
     def self.receive(db, shop:, webhook_id:, topic:, order_id:)
-      db.execute(<<~SQL, [shop, webhook_id, topic, order_id, Time.now.to_i]).any?
+      inserted = db.execute(<<~SQL, [shop, webhook_id, topic, order_id, Time.now.to_i]).any?
         INSERT INTO inbox (shop, webhook_id, topic, order_id, received_at) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT (shop, webhook_id) DO NOTHING RETURNING id
       SQL
+      return true if inserted
+
+      original = db.get_first_row("SELECT topic, order_id FROM inbox WHERE shop = ? AND webhook_id = ?", [shop, webhook_id])
+      raise ShopifyLedger::Inbox::IdentityConflict unless original == [topic, order_id]
+
+      false
+    end
+
+    # Webhook ingest into PostgreSQL. WEBrick serves requests on threads and a
+    # PG connection is not thread-safe, so requests share one connection in turn.
+    class Inbox
+      def initialize(url)
+        @db = Database.new(url).migrate
+        @mutex = Mutex.new
+      end
+
+      def receive(shop:, webhook_id:, topic:, order_id:, after_commit: nil)
+        inserted = @mutex.synchronize do
+          Postgres.receive(@db, shop: shop, webhook_id: webhook_id, topic: topic, order_id: order_id)
+        end
+        after_commit&.call if inserted
+        inserted
+      end
     end
 
     class Worker
