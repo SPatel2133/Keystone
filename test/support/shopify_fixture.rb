@@ -111,13 +111,18 @@ module ShopifyFixture
       @admin = admin
       @database = File.join(directory, "shopify.sqlite3")
       config_path = File.join(directory, "config.json")
-      shops = [ALPHA, BETA].each_with_object({}) do |shop, configs|
-        configs[shop] = { endpoint: admin.endpoint, token: "fake-token-for-#{shop}" }
-      end
-      File.write(config_path, JSON.generate(database: database, secret: SECRET, shops: shops))
+      @config_path = config_path
+      configure
       @environment = CrashHarness::CLEAN_ENV.merge("SHOPIFY_LEDGER_CONFIG" => config_path,
                                                     "SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK" => "1",
                                                     "SHOPIFY_LEDGER_PORT" => "0")
+    end
+
+    def configure(**settings)
+      shops = [ALPHA, BETA].each_with_object({}) do |shop, configs|
+        configs[shop] = { endpoint: admin.endpoint, token: "fake-token-for-#{shop}" }
+      end
+      File.write(@config_path, JSON.generate(database: database, secret: SECRET, shops: shops, **settings))
     end
 
     def with_endpoint(seam: nil)

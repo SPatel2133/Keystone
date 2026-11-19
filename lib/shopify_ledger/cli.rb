@@ -12,8 +12,10 @@ module ShopifyLedger
         require_relative "worker"
         status = Worker.new(Config.load).run_once(**hooks)
         puts JSON.generate(status: status)
-        return status == "retry" ? 1 : 0
+        return %w[retry parked].include?(status) ? 1 : 0
       end
+
+      return deliveries(arguments) if command == :deliveries
 
       script = command == :summary ? "shopify-summary" : "reconcile"
       raise ArgumentError, "usage: bin/#{script} SHOP" unless arguments.size == 1
@@ -33,6 +35,33 @@ module ShopifyLedger
       0
     rescue StandardError => error
       warn "shopify ledger: #{error.class}: #{error.message}"
+      1
+    end
+
+    DELIVERIES_USAGE = "usage: bin/shopify-deliveries list SHOP [--state STATE] | retry SHOP WEBHOOK_ID"
+
+    def self.deliveries(arguments)
+      require_relative "deliveries"
+      action, shop, *rest = arguments
+      config = Config.load
+      raise ArgumentError, DELIVERIES_USAGE unless shop
+
+      config.api(shop)
+      deliveries = Deliveries.new(config)
+      case [action, rest.size]
+      in ["list", 0] | ["list", 2]
+        raise ArgumentError, DELIVERIES_USAGE unless rest.empty? || rest.first == "--state"
+
+        state = rest.fetch(1, "pending")
+        puts JSON.generate(shop: shop, state: state, deliveries: deliveries.list(shop, state))
+      in ["retry", 1]
+        puts JSON.generate(shop: shop, delivery: deliveries.retry(shop, rest.first))
+      else
+        raise ArgumentError, DELIVERIES_USAGE
+      end
+      0
+    rescue Deliveries::Refused => error
+      puts JSON.generate(shop: shop, webhook_id: rest&.first, refused: error.message)
       1
     end
   end

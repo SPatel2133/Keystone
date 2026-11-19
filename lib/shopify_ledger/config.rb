@@ -7,7 +7,9 @@ module ShopifyLedger
     API_PATH = "/admin/api/#{API_VERSION}/graphql.json".freeze
     SHOP = /\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.myshopify\.com\z/
 
-    attr_reader :database, :secret
+    DEFAULT_MAX_ATTEMPTS = 12
+
+    attr_reader :database, :secret, :max_attempts
 
     def self.load
       path = File.expand_path(ENV.fetch("SHOPIFY_LEDGER_CONFIG"))
@@ -21,6 +23,10 @@ module ShopifyLedger
 
       @database = File.expand_path(required_string(data, "database"), directory).freeze
       @secret = required_string(data, "secret").freeze
+      @max_attempts = data.fetch("max_attempts", DEFAULT_MAX_ATTEMPTS)
+      unless @max_attempts.is_a?(Integer) && @max_attempts.between?(1, 1000)
+        raise ArgumentError, "max_attempts must be an integer from 1 to 1000"
+      end
       shops = data["shops"]
       raise ArgumentError, "configure at least one shop" unless shops.is_a?(Hash) && !shops.empty?
 
