@@ -52,6 +52,8 @@ class ShopifyPostgresTest < Minitest::Test
                  ShopifyLedger::Postgres.scratch_url("postgres://user:pass@localhost/ledger", "scratch")
     assert_equal "postgres://user:pass@localhost/ledger?sslmode=require&options=-csearch_path%3Dscratch",
                  ShopifyLedger::Postgres.scratch_url("postgres://user:pass@localhost/ledger?sslmode=require", "scratch")
+    assert_equal "host=db dbname=ledger options='-csearch_path=scratch'",
+                 ShopifyLedger::Postgres.scratch_url("host=db dbname=ledger", "scratch")
   end
 
   def test_scratch_schema_names_include_process_and_random_suffix

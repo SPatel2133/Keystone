@@ -102,6 +102,8 @@ module ShopifyLedger
     def self.scratch_url(url, schema)
       raise ArgumentError, "invalid PostgreSQL schema" unless schema.match?(/\A[a-z_][a-z0-9_]*\z/i)
 
+      return "#{url} options='-csearch_path=#{schema}'" unless url.start_with?("postgres://", "postgresql://")
+
       separator = URI.parse(url).query.to_s.empty? ? "?" : "&"
       "#{url}#{separator}options=-csearch_path%3D#{schema}"
     end
