@@ -46,7 +46,8 @@ module ShopifyLedger
         after_commit&.call if applied
         "processed"
       rescue Admin::Error, Payments::Error => error
-        defer(id, attempts, error)
+        # A stale failure is dropped; take the next claim, as the SQLite worker does.
+        defer(id, attempts, error) || run_once(before_commit: before_commit, after_commit: after_commit)
       end
 
       private
@@ -69,11 +70,18 @@ module ShopifyLedger
       def defer(id, attempts, error)
         now = Time.now.to_i
         parked = attempts + 1 >= @config.max_attempts
-        @db.execute(<<~SQL, [error.message, now + [2**(attempts + 1), 60].min, parked ? now : nil, now, id])
+        # The attempts guard drops a stale failure after an operator retry.
+        updated = @db.execute(<<~SQL, [error.message, now + [2**(attempts + 1), 60].min, parked ? now : nil, now, id, attempts])
           UPDATE inbox SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, parked_at = ?,
                            last_attempt_at = ?, claimed_by = NULL, claimed_until = NULL
-          WHERE id = ? AND processed = 0
+          WHERE id = ? AND processed = 0 AND parked_at IS NULL AND attempts = ?
+          RETURNING id
         SQL
+        if updated.empty?
+          @db.execute("UPDATE inbox SET claimed_by = NULL, claimed_until = NULL WHERE id = ? AND claimed_by = ?", [id, @owner])
+          return
+        end
+
         Log.event(parked ? "delivery_parked" : "delivery_retry", delivery: id, error: "#{error.class}: #{error.message}")
         parked ? "parked" : "retry"
       end

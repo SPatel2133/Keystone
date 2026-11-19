@@ -297,4 +297,27 @@ class ShopifyPostgresTest < Minitest::Test
       ENV.delete("SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK")
     end
   end
+
+  # Found in review: the PostgreSQL worker lacked SQLite's attempts guard, so a
+  # failure that began before an operator retry parked the requeued delivery.
+  def test_operator_retry_during_a_failing_fetch_is_not_overwritten_on_postgres
+    ShopifyFixture.run do |run|
+      run.configure(max_attempts: 2)
+      down = { errors: [{ message: "down" }] }
+      run.admin.arrange(ALPHA, "OrderPayments", order_gid(1), down, code: 500)
+      receive("sale", 1)
+      worker(run, "--once")
+      @db.execute("UPDATE inbox SET next_attempt_at = 0")
+      retried = false
+      run.admin.arrange(ALPHA, "OrderPayments", order_gid(1), down, code: 500) do
+        unless retried
+          retried = true
+          worker(run, "deliveries", "retry", ALPHA, "sale")
+        end
+      end
+      stdout, = worker(run, "--once")
+      assert_equal({ "status" => "retry" }, JSON.parse(stdout))
+      assert_equal [[0, nil, 1, 1]], @db.execute("SELECT processed, parked_at, attempts, requeues FROM inbox")
+    end
+  end
 end

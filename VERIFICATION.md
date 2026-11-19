@@ -183,6 +183,8 @@ Each bug got a regression test, which failed before its fix:
 - **`PG::UniqueViolation`** when two PostgreSQL workers apply the same order concurrently. Inserts are now `ON CONFLICT DO NOTHING RETURNING 1`, followed by a comparison with the winner's row.
 - **NULL `last_attempt_at`** on PostgreSQL completion.
 
+- **Operator retry overwritten by a stale failure.** On PostgreSQL, a failure that started before an operator retry parked the requeued delivery, because the worker lacked SQLite's attempts guard. `test_operator_retry_during_a_failing_fetch_is_not_overwritten_on_postgres` reported `parked` before the fix. Now the stale failure is dropped, the worker releases its lease and takes the next claim, which matches the SQLite worker; afterwards `bin/shopify-check` passed 90 runs / 952 assertions.
+
 Afterwards, `bin/shopify-check` passed 88 runs / 948 assertions, and `--postgres --processes --seed 21 --runs 10 --steps 150` had 0 failures.
 
 ## Found by fuzzer (PostgreSQL deadlock)
