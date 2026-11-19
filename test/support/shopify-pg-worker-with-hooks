@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/postgres"
+
+seam = ENV.fetch("SHOPIFY_TEST_CRASH", "")
+abort "unknown worker crash seam" unless %w[before_commit after_commit].include?(seam)
+exit ShopifyLedger::Postgres.cli(ARGV, seam.to_sym => -> { Process.kill("KILL", Process.pid) })
