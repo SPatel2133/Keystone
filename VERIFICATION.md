@@ -163,6 +163,10 @@ After the fixes, the same run had 0 failures in 27 s.
 | `--postgres --processes --seed 100 --runs 20 --steps 150` (52 concurrent multi-machine drains, 72 workers SIGKILLed mid-fetch) | 3,000 | 0 | 42.8 s |
 | `--postgres --seed 400000 --runs 500 --steps 300`, after reconciliation was ported (7,522 reconciles, 4,492 with a failing page) | 150,000 | 0 | 585.7 s |
 
+## Full-feature SQLite campaign
+
+`bin/shopify-fuzz --seed 500000 --runs 1000 --steps 300` was run at the hardening head. Its operations include shop moves, crashing at either seam (9,022), real Admin read timeouts, every payment kind and status, stale Admin reads (9,205) and reconciliation runs with a failing page (9,079). It performed 300,000 operations with 0 failures in 1,841.5 s (30 min 42 s wall), with a max RSS of 188 MB.
+
 ## Drain throughput: SQLite and PostgreSQL
 
 `ruby benchmark/shopify_drain.rb ORDERS 50 UPDATES [sqlite|postgres]` uses a fake Admin API that adds 50 ms of latency. Local Docker `postgres:16-alpine` was used, and a fuzz campaign was running on the same machine at the time.
