@@ -44,7 +44,7 @@ Run `test/whiteboard` from the project root to compare the deliberately broken s
 - The real SIGKILL and multi-process paths are behind `--processes`, because each one spawns Ruby.
 - The oracle is checked by a planted wrong amount, which must be caught and shrunk.
 
-*At Shopify scale:* the same model would drive a deterministic simulation of many pods and a real PostgreSQL. The faults injected would include network partitions between the worker and the database, not only API faults.
+*At Shopify scale:* the model already runs against a real PostgreSQL (`--postgres`). The next step would be a deterministic simulation of many pods. The faults injected would include network partitions between the worker and the database, not only API faults.
 
 **Payment statuses and currencies.** *What:* every Shopify transaction is kept in `payment_events` with its latest status, and only `SUCCESS` sales, captures and refunds reach the money table. *Why:* a pending capture must not count, but the operator still needs to see it. An authorization must be visible to tell whether captures exceed it. *Tradeoffs:*
 - Status only moves from an open status to a final one. A stale fetch that shows an older open status is ignored rather than rejected, because two workers can fetch the same order at different moments.

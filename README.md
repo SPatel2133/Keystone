@@ -49,6 +49,10 @@ black-box Shopify suite and `bin/shopify-demo` for the replay and reconciliation
 demo. Both use disposable databases and a local fake Shopify GraphQL server.
 They require no Shopify account, credentials, or webhook tunnel.
 
+### Verified against a real Shopify store
+
+The ledger also ran against a Shopify development store with 11 orders. Live `orders/updated` and `refunds/create` webhooks arrived through a temporary tunnel, and `bin/reconcile` filled in the rest. The stored totals matched Shopify exactly: USD collected `422.72`, refunded `104.99`, net `317.73`. Shopify's manual test gateway allows only one capture per authorization, so multiple partial captures are covered by the fake-Admin tests and the fuzzer instead ([details](VERIFICATION.md#real-shopify-development-store)).
+
 ```sh
 bundle check
 bin/check
@@ -396,7 +400,7 @@ Doctor supports the original ledger's rollback journal. It reports a missing led
 
 `ruby benchmark/shopify_operations.rb` times Shopify worker selection and `bin/shopify-status` against 50,000 parked and 50,000 processed deliveries ([results](VERIFICATION.md#measured-boundary-parked-history)).
 
-Run `bin/benchmark --full` for the 100,000-event workload, or `bin/benchmark --smoke` to check the same paths quickly. This single-writer sample used an Apple M5 with 16 GiB, Ruby 3.4.13 and SQLite 3.54.1.
+Run `bin/benchmark --full` for the 100,000-event workload, or `bin/benchmark --smoke` to check the same paths quickly. This single-writer sample used an Apple M5 with 16 GiB, Ruby 3.4.13 and SQLite 3.54.1. On Linux (Ubuntu x86_64), `bin/benchmark --full` ran ordered inserts at 917 ack/s (p50 0.96 ms, p95 1.59 ms) and identical retries at 6,516/s ([results](VERIFICATION.md#final-integrated-run)).
 
 | Measured boundary | Samples | Throughput | p50 / p95 |
 | --- | ---: | ---: | ---: |
@@ -416,7 +420,7 @@ With 257 free pages, the test database shrank from 1,064,960 to 12,288 bytes. A 
 
 ## Setup and original demo
 
-Tested on macOS arm64 with Ruby 3.4.13, Bundler 4.1.0, sqlite3 gem 2.10.2, and Minitest 5.27.0.
+Tested on macOS arm64 and Linux (Ubuntu) x86_64 with Ruby 3.4.13, Bundler 4.1.0, sqlite3 gem 2.10.2 and SQLite 3.54.1. CI also runs the PostgreSQL tests against PostgreSQL 16.
 
 Linux CI is configured for Ubuntu 22.04. To try the sequence CLI as an installed RubyGem, see the [local gem installation](VERIFICATION.md#reproduce-the-isolated-gem-install).
 
