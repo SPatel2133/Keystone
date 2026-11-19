@@ -4,10 +4,10 @@ This project implements two event consumers. The Shopify ledger tracks sales and
 
 ## Quick start
 
-From the repository root, install the locked dependencies and run both synthetic demos. The Shopify demo uses local fixtures and requires no merchant credentials.
+With Ruby 3.4.13 active, from the repository root install the locked dependencies and run both synthetic demos. The Shopify demo uses local fixtures and requires no merchant credentials.
 
 ```sh
-bundle check || bundle install --path vendor/bundle
+bundle check || bundle install
 bin/shopify-demo
 bin/inventory-demo
 ```
@@ -35,11 +35,7 @@ bin/shopify-demo --evidence > shopify-evidence.jsonl
 See the [Shopify verification runs](VERIFICATION.md#shopify-verification) and
 [recorded demo evidence](shopify-evidence.jsonl).
 
-The same lockfile covers both paths. The CI workflow targets Ubuntu 22.04 with
-Ruby 2.6.10, Bundler 1.17.2, sqlite3 1.3.13, and Minitest 5.11.3. Install a C
-compiler and SQLite headers for a source build. Ruby 2.6 is end of life and is
-retained here to match the available local runtime and the existing CLI. Use a
-supported runtime before deploying an Internet-facing service.
+Both consumers share one lockfile. CI uses the Ruby version in `.ruby-version` on Ubuntu 22.04.
 
 ### Running the Shopify commands
 
@@ -104,12 +100,25 @@ worker repeatedly to drain the inbox.
 From the project root, install the locked dependencies if needed. Run the inventory demo to exercise crash recovery.
 
 ```sh
-bundle check || bundle install --path vendor/bundle
+bundle check || bundle install
 project="$PWD"
 "$project/bin/inventory-demo"
 ```
 
 The warehouse opens with 20 units. Its ledger balance tracks *adjustments*. Watch scan 3 wait behind a gap, then watch SQLite after the child dies while acknowledging scan 2. The retry should leave 25 units on hand.
+
+Output from `bin/inventory-demo` on Ruby 3.4.13
+
+```text
+Opening stock is 20 units. The ledger records adjustments starting at zero.
+Scan 1 (+10) accepted. Cursor 1, adjustment +10, 30 units on hand.
+Scan 3 (-2) accepted. Cursor 1, adjustment +10, 30 units on hand.
+Waiting for scan 2. Scan 3 is already stored.
+Scan 2 (-3) committed. SIGKILL (9) before acknowledgment, 0 stdout bytes.
+SQLite before retry: rows=[[1,10],[2,-3],[3,-2]] checkpoint=[3,"5"]
+Retry scan 2: {"status":"duplicate","seq":2,"cursor":3,"balance":5}
+20 opening units + 5 adjustment units = 25 units on hand.
+```
 
 To inspect a stalled stream yourself, run the following from that same shell. The two deliveries create a ledger in a new temporary directory.
 
@@ -138,12 +147,12 @@ This sample used one writer on an Apple M5 MacBook Air with 16 GB RAM, macOS 26.
 
 ## Setup and original demo
 
-Tested on macOS arm64 with Ruby 2.6.10, Bundler 1.17.2, sqlite3 gem 1.3.13, SQLite 3.51.0, and Minitest 5.11.3. The sqlite3 gem needs a compiler and SQLite development headers when installed from source.
+Tested on macOS arm64 with Ruby 3.4.13, Bundler 4.1.0, sqlite3 gem 2.10.2, and Minitest 5.27.0.
 
 Run these commands from the project directory.
 
 ```sh
-bundle check || bundle install --path vendor/bundle
+bundle check || bundle install
 bin/check
 bin/demo
 bin/demo --evidence > evidence.jsonl
