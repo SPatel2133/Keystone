@@ -47,6 +47,29 @@ class ShopifyPostgresTest < Minitest::Test
     JSON.parse(stdout).fetch("totals").fetch(0).fetch("net")
   end
 
+  def test_scratch_url_appends_search_path_with_or_without_existing_query
+    assert_equal "postgres://user:pass@localhost/ledger?options=-csearch_path%3Dscratch",
+                 ShopifyLedger::Postgres.scratch_url("postgres://user:pass@localhost/ledger", "scratch")
+    assert_equal "postgres://user:pass@localhost/ledger?sslmode=require&options=-csearch_path%3Dscratch",
+                 ShopifyLedger::Postgres.scratch_url("postgres://user:pass@localhost/ledger?sslmode=require", "scratch")
+  end
+
+  def test_postgres_fuzz_uses_a_scratch_schema_without_touching_public_rows
+    @db.execute("CREATE TABLE public.keep_me (value TEXT PRIMARY KEY)")
+    @db.execute("INSERT INTO public.keep_me VALUES ('keep')")
+    @db.execute("INSERT INTO public.inbox (shop, webhook_id, topic, order_id, received_at) VALUES (?, ?, ?, ?, ?)",
+                [ALPHA, "public-marker", "orders/updated", ORDER, Time.now.to_i])
+
+    report = ShopifyFuzz.campaign(seed: 1000, runs: 1, steps: 1, backend: :postgres)
+    assert_empty report["failures"], JSON.pretty_generate(report["failures"])
+    assert_equal [["keep"]], @db.execute("SELECT value FROM public.keep_me")
+    assert_equal [["public-marker"]], @db.execute("SELECT webhook_id FROM public.inbox WHERE shop = ? AND webhook_id = ?",
+                                                  [ALPHA, "public-marker"])
+  ensure
+    @db&.execute("DELETE FROM public.inbox WHERE shop = ? AND webhook_id = ?", [ALPHA, "public-marker"])
+    @db&.execute("DROP TABLE IF EXISTS public.keep_me")
+  end
+
   def test_workers_on_four_machines_fetch_each_delivery_once_with_skip_locked
     ShopifyFixture.run do |run|
       1.upto(40) do |number|

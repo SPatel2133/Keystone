@@ -2,15 +2,38 @@ module ShopifyFuzz
   # The same operation lists against the PostgreSQL backend. Backups,
   # maintenance and moves are SQLite-only, so they do nothing here.
   class PostgresExecution < Execution
-    URL = ENV["SHOPIFY_LEDGER_POSTGRES_URL"]
+    def call
+      previous_url = ENV["SHOPIFY_LEDGER_POSTGRES_URL"]
+      @base_url = ENV.fetch("SHOPIFY_LEDGER_POSTGRES_URL")
+      super
+    ensure
+      @pg&.close
+      if @schema
+        cleanup = ShopifyLedger::Postgres::Database.new(@base_url)
+        begin
+          cleanup.execute("DROP SCHEMA IF EXISTS #{@schema} CASCADE")
+        ensure
+          cleanup.close
+        end
+      end
+      previous_url ? ENV["SHOPIFY_LEDGER_POSTGRES_URL"] = previous_url : ENV.delete("SHOPIFY_LEDGER_POSTGRES_URL")
+    end
 
     private
 
     def setup(orders, shop_count)
       super
       require_relative "../../../lib/shopify_ledger/postgres"
-      @pg&.close
-      @pg = ShopifyLedger::Postgres::Database.new(URL || raise(ArgumentError, "set SHOPIFY_LEDGER_POSTGRES_URL"))
+      @schema = "shopify_ledger_scratch_#{Process.pid}"
+      plain = ShopifyLedger::Postgres::Database.new(@base_url)
+      begin
+        plain.execute("CREATE SCHEMA IF NOT EXISTS #{@schema}")
+      ensure
+        plain.close
+      end
+      @scratch_url = ShopifyLedger::Postgres.scratch_url(@base_url, @schema)
+      ENV["SHOPIFY_LEDGER_POSTGRES_URL"] = @scratch_url
+      @pg = ShopifyLedger::Postgres::Database.new(@scratch_url)
       @pg.execute("DROP TABLE IF EXISTS #{ShopifyLedger::Postgres::TABLES.join(', ')}")
       @pg.migrate
     end
@@ -34,7 +57,7 @@ module ShopifyFuzz
     def op_worker(a, *)
       return run_worker(a) unless (a % 3).zero?
 
-      connections = Array.new(2) { ShopifyLedger::Postgres::Database.new(URL) }
+      connections = Array.new(2) { ShopifyLedger::Postgres::Database.new(@scratch_url) }
       threads = connections.each_with_index.map do |db, index|
         Thread.new { ShopifyLedger::Postgres::Worker.new(@config, db, owner: "thread-#{index}").run_once }
       end

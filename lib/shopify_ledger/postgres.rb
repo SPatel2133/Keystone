@@ -1,5 +1,6 @@
 require "json"
 require "socket"
+require "uri"
 require_relative "admin"
 require_relative "config"
 require_relative "inbox"
@@ -92,6 +93,13 @@ module ShopifyLedger
       "CREATE UNIQUE INDEX IF NOT EXISTS one_open_run_per_shop ON reconciliation_runs (shop) WHERE status <> 'completed'"
     ].freeze
     TABLES = %w[inbox transactions payment_events checkpoints reconciliation_starts reconciliation_runs].freeze
+
+    def self.scratch_url(url, schema)
+      raise ArgumentError, "invalid PostgreSQL schema" unless schema.match?(/\A[a-z_][a-z0-9_]*\z/i)
+
+      separator = URI.parse(url).query.to_s.empty? ? "?" : "&"
+      "#{url}#{separator}options=-csearch_path%3D#{schema}"
+    end
 
     def self.load_driver
       require "pg"

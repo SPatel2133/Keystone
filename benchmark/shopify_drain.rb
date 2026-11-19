@@ -14,9 +14,28 @@ latency = Integer(ARGV.fetch(1, "50")) / 1000.0
 updates = Integer(ARGV.fetch(2, "1"))
 backend = ARGV.fetch(3, "sqlite")
 abort "backend must be sqlite or postgres" unless %w[sqlite postgres].include?(backend)
+pg = nil
 if backend == "postgres"
   require_relative "../lib/shopify_ledger/postgres"
   ENV["SHOPIFY_LEDGER_INBOX"] = "postgres"
+  base_url = ENV.fetch("SHOPIFY_LEDGER_POSTGRES_URL")
+  schema = "shopify_ledger_scratch_#{Process.pid}"
+  plain = ShopifyLedger::Postgres::Database.new(base_url)
+  begin
+    plain.execute("CREATE SCHEMA IF NOT EXISTS #{schema}")
+  ensure
+    plain.close
+  end
+  ENV["SHOPIFY_LEDGER_POSTGRES_URL"] = ShopifyLedger::Postgres.scratch_url(base_url, schema)
+  at_exit do
+    pg&.close
+    cleanup = ShopifyLedger::Postgres::Database.new(base_url)
+    begin
+      cleanup.execute("DROP SCHEMA IF EXISTS #{schema} CASCADE")
+    ensure
+      cleanup.close
+    end
+  end
   pg = ShopifyLedger::Postgres::Database.new(ENV.fetch("SHOPIFY_LEDGER_POSTGRES_URL"))
 end
 deliveries = orders * updates
@@ -51,8 +70,8 @@ results = [1, 2, 4, 8].map do |workers|
     outputs = processes.map do |stdin, stdout, stderr, waiter|
       stdin.close
       output = stdout.read
-      stderr.read
-      raise "worker failed: #{output}" unless waiter.value.success?
+      errors = stderr.read
+      raise "worker failed: #{output}#{errors}" unless waiter.value.success?
 
       JSON.parse(output)
     end
