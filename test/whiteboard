@@ -1,0 +1,77 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require_relative "support/scenarios"
+require "fileutils"
+
+module Whiteboard
+  module_function
+
+  def make_split_copy(root, copy)
+    # Copy only the ledger executable, hook launcher, and their Ruby sources.
+    # Reuse the installed bundle through the unchanged original bootstrap.
+    %w[bin lib test/support].each { |dir| FileUtils.mkdir_p(File.join(copy, dir)) }
+    FileUtils.cp(File.join(root, "bin/ledger"), File.join(copy, "bin"))
+    FileUtils.cp_r(File.join(root, "lib/event_consumer"), File.join(copy, "lib"))
+    FileUtils.cp(File.join(root, "test/support/ledger-with-hooks"), File.join(copy, "test/support"))
+    File.write(File.join(copy, "lib/event_consumer/bundle.rb"),
+               "require #{File.join(root, "lib/event_consumer/bundle.rb").dump}\n")
+
+    source = File.join(copy, "lib/event_consumer/ledger.rb")
+    text = File.read(source)
+    insert = '      db.execute("INSERT INTO events (seq, delta) VALUES (?, ?)", [sequence, delta])'
+    raise "expected exactly one event insertion in disposable copy" unless text.lines.count { |line| line.chomp == insert } == 1
+
+    # Prematurely persist the event. The existing pre-commit SIGKILL now rolls
+    # back only the checkpoint transaction.
+    split = [insert, '      db.execute("COMMIT")', '      db.execute("BEGIN IMMEDIATE")'].join("\n")
+    File.write(source, text.sub(insert, split))
+  end
+
+  def observe(project)
+    Dir.mktmpdir("ledger-whiteboard-db-") do |dir|
+      entry = File.join(project, "bin/ledger")
+      hook_entry = File.join(project, "test/support/ledger-with-hooks")
+      oracle = PrefixOracle.new
+      Scenarios::FEED.first(2).each do |seq, delta|
+        receipt = LedgerProcess.response(dir, LedgerProcess.deliver(seq, delta), entry: entry)
+        Scenarios.verify!(oracle.receive(seq, delta), receipt, "seed")
+      end
+      request = LedgerProcess.deliver(2, -1, hook: "before_commit")
+      observation = CrashHarness.observation(*LedgerProcess.run(dir, request, entry: hook_entry))
+      Scenarios.verify!(CrashHarness.killed, observation, "child crash")
+      before_retry = LedgerProcess.snapshot(dir)
+      retry_receipt = LedgerProcess.response(dir, LedgerProcess.deliver(2, -1), entry: entry)
+      [before_retry, retry_receipt, LedgerProcess.snapshot(dir)]
+    end
+  end
+
+  def assert_rollback(observed)
+    Scenarios.verify!(Scenarios::INITIAL, observed, "pre-commit kill must roll back event 2 and its checkpoint")
+  end
+end
+
+abort "Usage: test/whiteboard" unless ARGV.empty?
+Dir.mktmpdir("ledger-whiteboard-copy-") do |copy|
+  Whiteboard.make_split_copy(LedgerProcess::ROOT, copy)
+  partial = Scenarios::COMPLETE.merge("checkpoint" => [1, "5"])
+  puts "Split prediction before retry: #{JSON.generate(partial)}"
+  broken, retry_receipt, final = Whiteboard.observe(copy)
+  Scenarios.verify!(partial, broken, "predicted split state")
+  begin
+    Whiteboard.assert_rollback(broken)
+  rescue RuntimeError => error
+    puts "Caught expected failed assertion: #{error.message}"
+  else
+    abort "atomic rollback assertion missed the split transaction"
+  end
+  Scenarios.verify!({ "status" => "duplicate", "seq" => 2, "cursor" => 1, "balance" => 5 }, retry_receipt, "split replay")
+  Scenarios.verify!(partial, final, "split replay leaves stale checkpoint")
+  puts "Split replay: #{JSON.generate(retry_receipt)}"
+
+  intact, replay, final = Whiteboard.observe(LedgerProcess::ROOT)
+  Whiteboard.assert_rollback(intact)
+  Scenarios.verify!({ "status" => "accepted", "seq" => 2, "cursor" => 3, "balance" => 6 }, replay, "intact replay")
+  Scenarios.verify!(Scenarios::COMPLETE, final, "intact recovery")
+  puts "Intact rollback assertion passed: #{JSON.generate(intact)}"
+  puts "Intact replay: #{JSON.generate(replay)}"
+end
