@@ -211,9 +211,17 @@ After the fix, the test passed 3 of 3 runs, the seed-31 campaign had 0 failures 
 
 Every run completed all deliveries with the exact expected net. Throughput is limited by Admin latency, not by the database.
 
+## Real Shopify development store
+
+Run on 2026-11-19 against a Shopify development store through a custom app (Admin API `2026-10`). The token and webhook secret stayed in a local config outside the repository.
+
+- **Reconciliation:** 8 orders with 13 transactions: 5 sales, 4 authorizations (2 captured, one of them partially; 1 voided; 1 left open) and 2 refunds (partial and full). `bin/reconcile` stored 9 money-moving transactions. Totals matched Shopify's transactions exactly: USD collected `290.23`, refunded `94.99`, net `195.24`. A second run changed nothing.
+- **Live webhooks:** `orders/updated` and `refunds/create` subscriptions pointed at `bin/shopify-webhook` through a temporary Cloudflare quick tunnel. Shopify signed requests with the app's client secret, and HMAC verification accepted them. 6 deliveries for 3 new orders (sale, authorization then full capture, sale then partial refund) were processed on the first attempt with no failures. Those orders' totals equal their payments. Afterwards 11 orders matched Shopify exactly: collected `422.72`, refunded `104.99`, net `317.73`, with 4 transactions sourced from webhooks.
+- **Limit of the test store:** Shopify's manual payment gateway accepts only one capture per authorization, so multiple partial captures could not be produced on a real store. They are covered by the fake-Admin tests.
+
 ## Not run
 
-PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
+Multi-host workers were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
 
 # Local verification on Ruby 3.4
 
