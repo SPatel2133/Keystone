@@ -71,6 +71,25 @@ class ShopifyOperationsEdgeTest < Minitest::Test
     end
   end
 
+  def test_a_repeated_page_cursor_fails_the_run_instead_of_looping_and_resumes_once_fixed
+    ShopifyFixture.run do |run|
+      run.admin.order([ShopifyScenarios.sale])
+      run.admin.order([ShopifyScenarios.refund], id: OTHER_ORDER)
+      run.admin.page([ORDER], next_cursor: "c1")
+      run.admin.page([OTHER_ORDER], after: "c1", next_cursor: "c1")
+      failure = run.reconcile(success: false)
+      assert_match(/repeated a reconciliation page cursor/, failure.fetch("stderr"))
+      # Page 1 is durable; the repeated page was never saved as progress.
+      assert_equal [["failed", 1, "c1"]], run.read("SELECT status, pages, cursor FROM reconciliation_runs")
+      assert_equal "100.00", run.summary.fetch("totals").first.fetch("net")
+
+      run.admin.page([OTHER_ORDER], after: "c1")
+      run.reconcile
+      assert_equal "75.00", run.summary.fetch("totals").first.fetch("net")
+      assert_equal [["completed", 2]], run.read("SELECT status, pages FROM reconciliation_runs ORDER BY id LIMIT 1")
+    end
+  end
+
   def test_audit_still_lists_rows_when_a_stored_currency_is_invalid
     ShopifyFixture.run do |run|
       assert_empty run.summary.fetch("totals")
