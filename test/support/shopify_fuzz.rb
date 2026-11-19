@@ -22,6 +22,8 @@ module ShopifyFuzz
   SHOPS = [ALPHA, BETA].freeze
   CURRENCIES = %w[CAD USD].freeze
   PAGE_SIZE = 3
+  # The fake Admin API answers a "timeout" fault after this, past the client's read timeout.
+  TIMEOUT = 0.2
   WEIGHTS = {
     "deliver" => 18, "duplicate" => 6, "worker" => 16, "crash_before_commit" => 3, "crash_after_commit" => 3,
     "orphan_claim" => 3, "admin_fault" => 6, "mutate" => 16, "advance_time" => 5, "operator_retry" => 3,
@@ -137,7 +139,7 @@ module ShopifyFuzz
 
     def setup(orders)
       # Shops start in "main" and move between it and "eu".
-      @fixture.configure(max_attempts: 3, databases: { "main" => File.basename(@fixture.database), "eu" => "eu.sqlite3" })
+      @fixture.configure(max_attempts: 3, api_read_timeout: TIMEOUT, databases: { "main" => File.basename(@fixture.database), "eu" => "eu.sqlite3" })
       @config_path = File.join(File.dirname(@fixture.database), "config.json")
       ENV["SHOPIFY_LEDGER_CONFIG"] = @config_path
       ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
@@ -266,10 +268,13 @@ module ShopifyFuzz
                     [500, { errors: [{ message: "fuzz" }] }],
                     [200, { errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }] }],
                     [503, "<html>unavailable</html>"]][c % 4]
+      # Rare, because each one costs a real read timeout.
+      timeout = (c % 20) == 19
       admin = @fixture.admin
       truth = order_body(shop, number)
       admin.arrange(shop, "OrderPayments", gid(number), body, code: code) do
         admin.arrange(shop, "OrderPayments", gid(number), truth)
+        sleep TIMEOUT * 2 if timeout
       end
     end
 

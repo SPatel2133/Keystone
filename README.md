@@ -138,7 +138,9 @@ gets its own fetch. Parked deliveries are never completed this way.
 Each Admin API request is retried inside one attempt on HTTP 429, 500, 502,
 503 and 504, on GraphQL `THROTTLED`, and on connection errors. Waits are 0.25 s
 then doubling, and `Retry-After` is honoured up to 2 s. Set `api_attempts`
-(1 to 10, default 3) in the configuration to change this. Every query is
+(1 to 10, default 3) in the configuration to change this, and
+`api_read_timeout` (0.05 to 60 seconds, default 10) to change how long a request
+waits for a response. A read timeout counts as a connection error. Every query is
 read-only, so retrying one never changes Shopify state. Malformed or
 incomplete responses are not retried; they count as a failed attempt. The client
 also reads GraphQL query cost from `extensions.cost`. A `THROTTLED` retry waits
@@ -284,7 +286,7 @@ reference model of the fake Admin API's ground truth.
 The operations include:
 - new, duplicate and refund deliveries;
 - workers that crash before or after commit, and claims left by dead workers;
-- Admin API faults: 429, 500, 503 and `THROTTLED`;
+- Admin API faults: 429, 500, 503, `THROTTLED` and real read timeouts (the fuzzer sets `api_read_timeout` to 0.2 s);
 - order changes, with or without a webhook;
 - operator retries, backups and maintenance;
 - reconciliation runs whose pages fail.

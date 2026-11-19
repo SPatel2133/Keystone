@@ -34,6 +34,28 @@ class ShopifyApiResilienceTest < Minitest::Test
     end
   end
 
+  def test_a_read_timeout_is_retried_within_the_attempt_and_the_limit_is_configurable
+    ShopifyFixture.run do |run|
+      run.configure(api_attempts: 2, api_read_timeout: 0.2)
+      deliver_one(run)
+      admin = run.admin
+      admin.arrange(ALPHA, "OrderPayments", ORDER, { data: nil }) do
+        admin.order([ShopifyScenarios.sale])
+        sleep 0.5
+      end
+      _stdout, stderr, process = run.command("bin/shopify-worker", "--once")
+      assert process.success?, stderr
+      assert_equal 2, order_requests(run)
+      assert_match(/Net::ReadTimeout/, stderr.lines.find { |line| line.include?("admin_api_retry") })
+      assert_equal ShopifyScenarios::BEFORE, run.summary
+
+      run.configure(api_read_timeout: 0)
+      _stdout, stderr, process = run.command("bin/shopify-worker", "--once")
+      refute process.success?
+      assert_match(/api_read_timeout must be a number of seconds/, stderr)
+    end
+  end
+
   def test_persistent_outage_spends_bounded_attempts_then_defers_the_delivery
     ShopifyFixture.run do |run|
       run.configure(api_attempts: 3)
