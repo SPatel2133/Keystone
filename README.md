@@ -138,6 +138,8 @@ incomplete responses are not retried; they count as a failed attempt.
 ```sh
 bin/shopify-status                                   # every configured shop
 bin/shopify-status example.myshopify.com
+bin/shopify-status --prometheus                      # metrics text for a scraper
+bin/reconcile --all                                  # every configured shop, e.g. from cron
 bin/shopify-deliveries list example.myshopify.com --state parked
 bin/shopify-deliveries retry example.myshopify.com WEBHOOK_ID
 bin/shopify-audit example.myshopify.com --order gid://shopify/Order/101
@@ -152,6 +154,8 @@ bin/shopify-audit example.myshopify.com --order gid://shopify/Order/101
   `reasons` explains each problem: parked deliveries, a pending delivery
   waiting over 15 minutes, a failed reconciliation run, a checkpoint over two
   hours old, reconciliation that has never completed, or unreadable totals.
+- `--prometheus` prints the same counts and ages in Prometheus text format: health, deliveries by state, oldest pending age, checkpoint age, open runs and transactions by source. The exit status is the same as for JSON. Money totals are left out on purpose: metric samples are floats, and totals must stay exact.
+- `bin/reconcile --all` reconciles each configured shop in turn and prints one result per shop. A shop that fails is reported, does not stop the others, and makes the command exit 1. Its run stays resumable.
 - After `max_attempts` failed attempts (1 to 1000, default 12) a delivery is
   **parked**. The worker never selects it again, so a poison order cannot use
   up worker time, and other orders keep flowing. `bin/shopify-deliveries list`

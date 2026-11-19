@@ -27,6 +27,39 @@ module ShopifyLedger
       end
     end
 
+    # Prometheus text exposition of the counts and ages in a report. Money is
+    # left out on purpose: metric samples are floats, and totals must stay exact.
+    def self.prometheus(report)
+      metrics = {
+        "shopify_ledger_healthy" => ["gauge", "1 when the shop needs no attention", []],
+        "shopify_ledger_deliveries" => ["gauge", "Webhook deliveries by state", []],
+        "shopify_ledger_oldest_pending_delivery_age_seconds" => ["gauge", "Age of the oldest pending delivery", []],
+        "shopify_ledger_reconciliation_checkpoint_age_seconds" => ["gauge", "Age of the reconciliation checkpoint", []],
+        "shopify_ledger_reconciliation_open_run" => ["gauge", "1 when a reconciliation run is unfinished", []],
+        "shopify_ledger_transactions" => ["gauge", "Stored payment transactions by recording source", []]
+      }
+      report.each do |shop|
+        label = %(shop="#{shop[:shop]}")
+        deliveries = shop[:deliveries]
+        reconciliation = shop[:reconciliation]
+        transactions = shop[:transactions]
+        metrics["shopify_ledger_healthy"][2] << ["{#{label}}", shop[:health] == "ok" ? 1 : 0]
+        %i[pending failing parked processed].each do |state|
+          metrics["shopify_ledger_deliveries"][2] << [%({#{label},state="#{state}"}), deliveries[state]]
+        end
+        metrics["shopify_ledger_oldest_pending_delivery_age_seconds"][2] << ["{#{label}}", deliveries[:oldest_pending_age_seconds] || 0]
+        age = reconciliation[:checkpoint_age_seconds]
+        metrics["shopify_ledger_reconciliation_checkpoint_age_seconds"][2] << ["{#{label}}", age] if age
+        metrics["shopify_ledger_reconciliation_open_run"][2] << ["{#{label}}", reconciliation[:open_run] ? 1 : 0]
+        { "delivery" => :from_webhooks, "reconciliation" => :repaired_by_reconciliation, "unknown" => :unknown_source }.each do |source, key|
+          metrics["shopify_ledger_transactions"][2] << [%({#{label},source="#{source}"}), transactions[key]]
+        end
+      end
+      metrics.flat_map do |name, (type, help, samples)|
+        ["# HELP #{name} #{help}", "# TYPE #{name} #{type}"] + samples.map { |labels, value| "#{name}#{labels} #{value}" }
+      end.join("\n")
+    end
+
     private
 
     def shop_status(db, shop, now)

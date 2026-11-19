@@ -12,6 +12,8 @@ module ShopifyLedger
       return status(arguments) if command == :status
       return audit(arguments) if command == :audit
 
+      return reconcile_all if command == :reconcile && arguments == ["--all"]
+
       script = command == :summary ? "shopify-summary" : "reconcile"
       raise ArgumentError, "usage: bin/#{script} SHOP" unless arguments.size == 1
 
@@ -62,15 +64,35 @@ module ShopifyLedger
       counts.values_at("retry", "parked").sum.zero? && counts["status"] != "storage_error" ? 0 : 1
     end
 
+    # Reconciles every configured shop in order. One shop's failure is reported
+    # and does not stop the others; the exit status is 1 if any shop failed.
+    def self.reconcile_all
+      require_relative "reconciliation"
+      config = Config.load
+      results = config.shops.map do |shop|
+        { shop: shop, synced_through: Reconciliation.new(config).run(shop) }
+      rescue StandardError => error
+        { shop: shop, error: "#{error.class}: #{error.message}" }
+      end
+      puts JSON.generate(shops: results)
+      results.any? { |result| result.key?(:error) } ? 1 : 0
+    end
+
     # Exit 0 when every shop is healthy, 2 when any shop needs attention.
     def self.status(arguments)
-      raise ArgumentError, "usage: bin/shopify-status [SHOP]" if arguments.size > 1
+      arguments = arguments.dup
+      prometheus = !arguments.delete("--prometheus").nil?
+      raise ArgumentError, "usage: bin/shopify-status [--prometheus] [SHOP]" if arguments.size > 1
 
       require_relative "status"
       config = Config.load
       shops = arguments.empty? ? config.shops : arguments.each { |shop| config.api(shop) }
       report = Status.new(config).report(shops)
-      puts JSON.generate(generated_at: Time.now.utc.iso8601, shops: report)
+      if prometheus
+        puts Status.prometheus(report)
+      else
+        puts JSON.generate(generated_at: Time.now.utc.iso8601, shops: report)
+      end
       report.all? { |shop| shop[:health] == "ok" } ? 0 : 2
     end
 
