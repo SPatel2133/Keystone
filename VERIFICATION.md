@@ -177,6 +177,14 @@ After the fixes, the same run had 0 failures in 27 s.
 
 The first attempt failed in `bin/shopify-demo --evidence`, with `Errno::EISDIR` on the new `test/support/shopify_fuzz/` directory. The evidence digest now covers nested source files and skips directories, and CI now runs that command too.
 
+## Found in review (PostgreSQL)
+
+Each bug got a regression test, which failed before its fix:
+- **`PG::UniqueViolation`** when two PostgreSQL workers apply the same order concurrently. Inserts are now `ON CONFLICT DO NOTHING RETURNING 1`, followed by a comparison with the winner's row.
+- **NULL `last_attempt_at`** on PostgreSQL completion.
+
+Afterwards, `bin/shopify-check` passed 88 runs / 948 assertions, and `--postgres --processes --seed 21 --runs 10 --steps 150` had 0 failures.
+
 ## Drain throughput: SQLite and PostgreSQL
 
 `ruby benchmark/shopify_drain.rb ORDERS 50 UPDATES [sqlite|postgres]` uses a fake Admin API that adds 50 ms of latency. Local Docker `postgres:16-alpine` was used, and a fuzz campaign was running on the same machine at the time.
