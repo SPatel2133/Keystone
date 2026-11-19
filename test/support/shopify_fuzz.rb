@@ -25,7 +25,8 @@ module ShopifyFuzz
   WEIGHTS = {
     "deliver" => 18, "duplicate" => 6, "worker" => 16, "crash_before_commit" => 3, "crash_after_commit" => 3,
     "orphan_claim" => 3, "admin_fault" => 6, "mutate" => 16, "advance_time" => 5, "operator_retry" => 3,
-    "reconcile" => 5, "reconcile_failing_page" => 3, "backup" => 1, "maintain" => 1, "complete_pending" => 4
+    "reconcile" => 5, "reconcile_failing_page" => 3, "backup" => 1, "maintain" => 1, "complete_pending" => 4,
+    "admin_stale_read" => 3
   }.freeze
   PROCESS_WEIGHTS = { "drain_processes" => 2, "kill_mid_fetch" => 2 }.freeze
 
@@ -45,15 +46,28 @@ module ShopifyFuzz
     { "message" => error.message }
   end
 
-  # Drops operations one at a time while the failure still reproduces.
+  # Drops operations while the failure still reproduces: halving chunks first
+  # for speed, then one operation at a time until nothing more can go.
   def self.shrink(ops)
     current = ops
+    chunk = [(current.size - 1) / 2, 1].max
     loop do
-      smaller = (1...current.size).lazy.map { |index| current[0...index] + current[index + 1..] }
-                                   .find { |candidate| execute(candidate) }
-      return current unless smaller
-
-      current = smaller
+      index = 1
+      changed = false
+      while index < current.size
+        candidate = current[0...index] + (current[(index + chunk)..] || [])
+        if execute(candidate)
+          current = candidate
+          changed = true
+        else
+          index += chunk
+        end
+      end
+      if chunk > 1
+        chunk /= 2
+      elsif !changed
+        return current
+      end
     end
   end
 
@@ -129,7 +143,7 @@ module ShopifyFuzz
       @inbox = ShopifyLedger::Inbox.new(@storage)
       @clock = Time.now
       @orders = SHOPS.product((1..orders).to_a).to_h do |shop, number|
-        [[shop, number], { currency: CURRENCIES[(number + SHOPS.index(shop)) % 2], transactions: [] }]
+        [[shop, number], { currency: CURRENCIES[(number + SHOPS.index(shop)) % 2], transactions: [], history: [] }]
       end
       @truth = {}
       @counters = Hash.new(0)
@@ -153,6 +167,8 @@ module ShopifyFuzz
     end
 
     def arrange_truth(shop, number)
+      order = @orders.fetch([shop, number])
+      order[:history] << order[:transactions].dup unless order[:history].last == order[:transactions]
       @fixture.admin.arrange(shop, "OrderPayments", gid(number), order_body(shop, number))
     end
 
@@ -231,6 +247,22 @@ module ShopifyFuzz
       admin = @fixture.admin
       truth = order_body(shop, number)
       admin.arrange(shop, "OrderPayments", gid(number), body, code: code) do
+        admin.arrange(shop, "OrderPayments", gid(number), truth)
+      end
+    end
+
+    # Admin reads can lag: one fetch answers with an earlier state of the order.
+    def op_admin_stale_read(a, b, c)
+      shop, number = order_key(a, b)
+      history = @orders.fetch([shop, number])[:history]
+      return if history.empty?
+
+      old = history[c % history.size]
+      admin = @fixture.admin
+      truth = order_body(shop, number)
+      body = { data: { order: { id: gid(number), transactions: old,
+                                transactionsCount: { count: old.size, precision: "EXACT" } } } }
+      admin.arrange(shop, "OrderPayments", gid(number), body) do
         admin.arrange(shop, "OrderPayments", gid(number), truth)
       end
     end
