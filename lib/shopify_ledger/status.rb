@@ -75,7 +75,7 @@ module ShopifyLedger
       {
         shop: shop, health: reasons.empty? ? "ok" : "attention", reasons: reasons,
         deliveries: deliveries, reconciliation: reconciliation, transactions: transactions,
-        totals: totals, totals_error: totals_error
+        payments: payments(db, shop), totals: totals, totals_error: totals_error
       }.compact
     end
 
@@ -128,6 +128,13 @@ module ShopifyLedger
       SQL
       { total: total, from_webhooks: delivery, repaired_by_reconciliation: reconciliation,
         unknown_source: total - delivery - reconciliation }
+    end
+
+    def payments(db, shop)
+      review = Payments.review(db, shop)
+      { open_transactions: review[:open_transactions],
+        orders_refunded_beyond_collected: review[:refunds_exceeding_collected].size,
+        authorizations_captured_beyond_amount: review[:captures_exceeding_authorization].size }
     end
 
     def attention(deliveries, reconciliation, totals_error)

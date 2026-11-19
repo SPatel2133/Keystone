@@ -123,6 +123,19 @@ The 2,000-run campaign included 19,940 crashes before commit and 20,338 after co
 - **Harness issue found and fixed:** with `--processes`, a SIGKILLed worker can leave a hot rollback journal. A `readonly: true` reader then raises `SQLite3::ReadOnlyException`. The checker now uses a writable connection.
 - **No ledger bug was found.**
 
+## Payment domain
+
+`test/shopify/payment_domain_test.rb` adds 7 tests. With them, `bin/check` passes 29 runs / 483 assertions and `bin/shopify-check` passes 66 runs / 732 assertions, with no failures.
+
+Mutation check of the extended fuzzer (5 runs × 200 steps, seed 1):
+
+| Mutant | Result |
+| --- | --- |
+| Count `PENDING` payments as money | Caught; shrunk to 1 operation |
+| Statuses never update | Caught at settle; shrunk to 3 operations |
+| Remove the stale-read guard | Not caught. It only causes retries, not wrong data. |
+| Overwrite presentment money on every fetch | Not caught, as expected: it changes nothing |
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.

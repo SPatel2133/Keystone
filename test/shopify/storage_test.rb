@@ -106,4 +106,26 @@ class ShopifyStorageTest < Minitest::Test
     assert status.success?, stderr
     assert_equal "100.00", JSON.parse(stdout).fetch("totals").fetch(0).fetch("net")
   end
+
+  def test_failed_payment_domain_upgrade_rolls_back_to_version_three
+    build_version(3)
+    SQLite3::Database.new(@path) do |db|
+      db.execute("INSERT INTO transactions (shop, transaction_id, order_id, currency, kind, amount) VALUES (?, ?, ?, ?, ?, ?)",
+                 [SHOP, "sale-1", "order-1", "CAD", "SALE", "100.00"])
+      db.execute("CREATE INDEX payment_events_by_shop_order ON checkpoints (shop)")
+    end
+    _stdout, stderr, status = summary
+    refute status.success?
+    assert_match(/already exists/, stderr)
+    SQLite3::Database.new(@path) do |db|
+      assert_equal ShopifyLedger::Storage.catalogs[3], ShopifyLedger::Storage.catalog(db)
+      db.execute("DROP INDEX payment_events_by_shop_order")
+    end
+    stdout, stderr, status = summary
+    assert status.success?, stderr
+    assert_equal "100.00", JSON.parse(stdout).fetch("totals").fetch(0).fetch("net")
+    SQLite3::Database.new(@path) do |db|
+      assert_equal ShopifyLedger::Storage.catalogs.last, ShopifyLedger::Storage.catalog(db)
+    end
+  end
 end

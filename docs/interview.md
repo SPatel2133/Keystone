@@ -45,3 +45,8 @@ Run `test/whiteboard` from the project root to compare the deliberately broken s
 - The oracle is checked by a planted wrong amount, which must be caught and shrunk.
 
 *At Shopify scale:* the same model would drive a deterministic simulation of many pods and a real PostgreSQL. The faults injected would include network partitions between the worker and the database, not only API faults.
+
+**Payment statuses and currencies.** *What:* every Shopify transaction is kept in `payment_events` with its latest status, and only `SUCCESS` sales, captures and refunds reach the money table. *Why:* a pending capture must not count, but the operator still needs to see it. An authorization must be visible to tell whether captures exceed it. *Tradeoffs:*
+- Status only moves from an open status to a final one. A stale fetch that shows an older open status is ignored rather than rejected, because two workers can fetch the same order at different moments.
+- Refunds above the collected amount, and captures above their authorization, are reported, not rejected. Shopify is the source of truth, and rejecting would park the delivery forever.
+- Presentment money is stored but never converted. Converting would need an exchange rate that the ledger does not own.

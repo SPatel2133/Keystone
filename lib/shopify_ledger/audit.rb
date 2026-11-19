@@ -43,7 +43,8 @@ module ShopifyLedger
       {
         shop: shop, totals: totals, totals_error: totals_error,
         transaction_count: db.get_first_value("SELECT COUNT(*) FROM transactions WHERE shop = ?", [shop]),
-        truncated: rows.size > limit, transactions: rows.first(limit).map { |row| describe(row) }
+        truncated: rows.size > limit, transactions: rows.first(limit).map { |row| describe(row) },
+        review: Payments.review(db, shop)
       }.compact
     end
 
@@ -61,12 +62,24 @@ module ShopifyLedger
         shop: shop, order_id: order_id, totals: invalid ? nil : totals(rows),
         totals_error: invalid ? "Stored payment has invalid currency; reconcile its order" : nil,
         transactions: rows.map { |row| describe(row) },
+        review: Payments.review(db, shop, order_id: order_id),
+        shopify_transactions: shopify_transactions(db, shop, order_id),
         deliveries: deliveries.map do |webhook_id, topic, processed, parked_at, attempts, requeues, received, done, error|
           state = if processed == 1 then "processed" elsif parked_at then "parked" elsif attempts.positive? then "failing" else "pending" end
           { webhook_id: webhook_id, topic: topic, state: state, attempts: attempts, requeues: requeues,
             received_at: iso(received), processed_at: iso(done), last_error: error }
         end
       }.compact
+    end
+
+    # Every transaction Shopify reported for the order, including ones that do not move money.
+    def shopify_transactions(db, shop, order_id)
+      db.execute(<<~SQL, [shop, order_id]).map do |row|
+        SELECT transaction_id, kind, status, currency, amount, presentment_currency, presentment_amount, parent_transaction_id
+        FROM payment_events WHERE shop = ? AND order_id = ? ORDER BY first_seen_at, transaction_id
+      SQL
+        %i[transaction_id kind status currency amount presentment_currency presentment_amount parent_transaction_id].zip(row).to_h.compact
+      end
     end
 
     def totals(rows)

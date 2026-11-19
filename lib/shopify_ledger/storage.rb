@@ -74,6 +74,31 @@ module ShopifyLedger
     "CREATE INDEX inbox_eligible ON inbox (id, next_attempt_at) WHERE processed = 0 AND parked_at IS NULL",
       "CREATE INDEX transactions_by_shop_order ON transactions (shop, order_id)"
     ].freeze
+    # Every transaction Shopify reports, with its latest status. Only SUCCESS
+    # sales, captures and refunds move money, and those also go to transactions.
+    PAYMENT_DOMAIN = [
+      "ALTER TABLE transactions ADD COLUMN presentment_currency TEXT",
+      "ALTER TABLE transactions ADD COLUMN presentment_amount TEXT",
+      "ALTER TABLE transactions ADD COLUMN parent_transaction_id TEXT",
+      <<~SQL.chomp,
+        CREATE TABLE payment_events (
+          shop TEXT NOT NULL,
+          transaction_id TEXT NOT NULL,
+          order_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          currency TEXT NOT NULL,
+          amount TEXT NOT NULL,
+          presentment_currency TEXT NOT NULL,
+          presentment_amount TEXT NOT NULL,
+          parent_transaction_id TEXT,
+          first_seen_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (shop, transaction_id)
+        )
+      SQL
+      "CREATE INDEX payment_events_by_shop_order ON payment_events (shop, order_id)"
+    ].freeze
     # Each step upgrades the catalog left by the previous one. A new database
     # runs every step, so fresh and upgraded files share one table definition.
     MIGRATIONS = [
@@ -81,7 +106,8 @@ module ShopifyLedger
        "CREATE INDEX inbox_ready ON inbox (processed, next_attempt_at, id)",
        "CREATE INDEX transactions_by_shop_currency ON transactions (shop, currency)"],
       [STARTS_TABLE],
-      OPERATIONS
+      OPERATIONS,
+      PAYMENT_DOMAIN
     ].freeze
 
     def self.catalogs

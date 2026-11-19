@@ -190,6 +190,31 @@ bin/shopify-audit example.myshopify.com --order gid://shopify/Order/101
   on stderr, for example `{"event":"delivery_parked","shop":...,"delivery":...,"attempt":12,"error":...}`.
   Logs carry identifiers and outcomes only, never tokens or webhook bodies.
 
+### Payment kinds, statuses and currencies
+
+The worker and reconciliation store every transaction Shopify reports for an
+order, with its latest status, in `payment_events`. Only `SUCCESS` sales,
+captures and refunds move money, and those also go to the insert-only
+`transactions` table that the totals are built from.
+
+| Case | Behaviour |
+| --- | --- |
+| `SALE`, `CAPTURE` (partial or multiple against one `AUTHORIZATION`), `REFUND` | Count when `SUCCESS`. A capture keeps its `parentTransaction` ID. |
+| `AUTHORIZATION`, `VOID`, `CHANGE`, `EMV_AUTHORIZATION`, `SUGGESTED_REFUND` | Recorded in `payment_events`, never in totals. |
+| `PENDING`, `AWAITING_RESPONSE` or `UNKNOWN`, then `SUCCESS` | The payment counts when a fetch first shows `SUCCESS`. |
+| A stale fetch shows an open status after a final one | Ignored. The stored final status stays. |
+| A final status changes to another (`SUCCESS` to `FAILURE`) | Rejected. The delivery retries and then parks. |
+| Buyer pays in another currency | Shop money is counted. `presentmentMoney` is stored next to it and never converted. |
+| Presentment money in the shop currency but with a different amount | Rejected. |
+| Refund or capture in a different shop currency from its parent | Rejected. |
+| Refund larger than collected, or captures larger than their authorization | Recorded as Shopify reports them. Listed under `review` in `bin/shopify-audit` and counted under `payments` in `bin/shopify-status`. |
+| BHD (3 decimals), JPY (0 decimals) | Amounts stay exact strings, for example `1.234`. Totals keep at least two decimals, so 4,000 JPY shows as `4000.00`. |
+
+Chargebacks and disputes are out of scope. In Admin GraphQL `2026-10` they are
+`ShopifyPaymentsDispute` objects, available only for Shopify Payments, not
+order transaction kinds. The money movement they cause shows up as transactions
+on the order.
+
 ### Randomized crash testing
 
 `bin/shopify-fuzz [--seed N] [--steps N] [--runs N] [--processes]` expands each

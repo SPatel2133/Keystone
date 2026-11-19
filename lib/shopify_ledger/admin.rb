@@ -23,7 +23,11 @@ module ShopifyLedger
             id
             kind
             status
-            amountSet { shopMoney { amount currencyCode } }
+            amountSet {
+              shopMoney { amount currencyCode }
+              presentmentMoney { amount currencyCode }
+            }
+            parentTransaction { id }
           }
         }
       }
