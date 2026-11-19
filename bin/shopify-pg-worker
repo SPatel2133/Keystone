@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+# PostgreSQL worker: bin/shopify-pg-worker --once | --drain | summary SHOP
+# Needs SHOPIFY_LEDGER_POSTGRES_URL and `bundle config set --local with postgres`.
+require_relative "../lib/event_consumer/bundle"
+require_relative "../lib/shopify_ledger/postgres"
+
+begin
+  exit ShopifyLedger::Postgres.cli(ARGV)
+rescue ArgumentError, LoadError => error
+  warn "shopify ledger: #{error.message}"
+  exit 64
+end

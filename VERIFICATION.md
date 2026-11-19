@@ -136,6 +136,15 @@ Mutation check of the extended fuzzer (5 runs × 200 steps, seed 1):
 | Remove the stale-read guard | Not caught. It only causes retries, not wrong data. |
 | Overwrite presentment money on every fetch | Not caught, as expected: it changes nothing |
 
+## PostgreSQL workers
+
+Locally against Docker `postgres:16-alpine`, `test/shopify/postgres_test.rb` passes 4 runs / 69 assertions:
+- Four workers with different machine IDs drain 40 deliveries with 50 ms Admin latency. That takes exactly 40 Admin fetches, and the total is `830.00`.
+- Workers SIGKILLed before and after commit leave exactly one payment.
+- Admin 500s back off and then park the delivery.
+
+Hosted CI ran it against the `postgres:16` service container: `bin/shopify-check` passed 70 runs / 801 assertions with 0 skips.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
