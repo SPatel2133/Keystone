@@ -213,6 +213,8 @@ Doctor supports the original ledger's rollback journal. It reports a missing led
 
 ## Benchmark
 
+`ruby benchmark/shopify_operations.rb` times Shopify worker selection and `bin/shopify-status` against 50,000 parked and 50,000 processed deliveries ([results](VERIFICATION.md#measured-boundary-parked-history)).
+
 Run `bin/benchmark --full` for the 100,000-event workload, or `bin/benchmark --smoke` to check the same paths quickly. This single-writer sample used an Apple M5 with 16 GiB, Ruby 3.4.13 and SQLite 3.54.1.
 
 | Measured boundary | Samples | Throughput | p50 / p95 |

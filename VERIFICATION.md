@@ -1,3 +1,47 @@
+# Shopify operations verification on Linux
+
+Branch `devin/1795078530-shopify-operations`, based on `66ab683`. The machine was Linux x86_64 (8 vCPU Intel Xeon, kernel 6.8, 32 GiB) running Ruby 3.4.13, Bundler 4.1.0, SQLite 3.54.1 and the sqlite3 2.10.2 gem. Every database was disposable. The Shopify Admin API was the local synthetic GraphQL server, and no credentials or merchant data were used.
+
+## Baseline before changes
+
+`bin/check` passed 29 tests / 483 assertions, and `bin/shopify-check` passed 20 tests / 153 assertions. The demos and `test/whiteboard` exited 0.
+
+## Final integrated run
+
+The block in "Reproduce the integrated run" ran from a scratch directory whose path contained a space. The project was reached through a symlink with a space in its path. `BUNDLE_GEMFILE` and `RUBYOPT` were unset, and the bundle was frozen in an empty `BUNDLE_PATH`. `bin/shopify-ops-demo` and five repeats of the new operations, resumable-reconciliation and race tests were added to the run.
+
+- `bin/check` passed **29 / 483**, and `bin/shopify-check` passed **37 / 378**. There were zero failures, errors or skips.
+- Contention ran five times at 1 / 8 each. Maintenance passed 4 / 38. Seeds 1–10 passed 1 / 430. The Shopify operations, resume and race subset passed five times at 7 / 80 each.
+- `bin/demo`, `bin/inventory-demo`, `bin/shopify-demo`, `bin/shopify-ops-demo`, `test/whiteboard`, both evidence commands and both benchmark modes exited 0. The caller ledger seeded with `1:+99` kept the same SHA-256.
+- `bin/benchmark --full` on this machine ran 100,000 ordered events at 917 ack/s (p50 0.96 ms, p95 1.59 ms) and 100,000 identical retries at 6,516 ack/s (p50 0.13 ms). It closed a 10,000-event gap in 80 ms. Through the CLI with interpreter startup, p50 was 189 ms. Storage was 8.89 bytes per event. `benchmark/results.json` is still the macOS sample cited in the README.
+- Hosted CI (`verify.yml`, Ubuntu 22.04) passed on PR #1. The workflow now also runs `bin/shopify-ops-demo`.
+
+## Crash, retry and concurrency outcomes
+
+- **Killed reconciliation.** A child reconciler was sent SIGKILL while it waited on page 2. The run stayed `running` with page 1 and its cursor durable. The next `bin/reconcile` resumed at that cursor, finished the window, then ran a fresh window. Totals were exact, and no transaction was duplicated.
+- **Expired cursor.** When the first request with a saved cursor failed, the cursor was cleared and the next attempt rescanned from page one. Replayed pages were idempotent.
+- **Concurrent reconcilers.** A second process ran to completion while the first was blocked mid-fetch. It resumed the same open run, then scanned a fresh window. The first process then finished without moving the checkpoint backwards. Both runs ended `completed` with two transactions.
+- **Operator retry racing a worker.** An operator requeue happened during a failing Admin fetch. The worker's attempt-count guard discarded its stale failure update, so the delivery was neither parked nor double-counted (attempts 1, requeues 1).
+- **Poison delivery.** After `max_attempts` the delivery was parked, and deliveries for other orders were still processed. Processed deliveries refuse `retry`.
+- **Admin retries.** HTTP 429/5xx, `THROTTLED` and connection failures were retried within `api_attempts`, with `Retry-After` capped at 2 s. Permanent 4xx, malformed JSON and other GraphQL errors made exactly one request.
+- **Migrations.** Legacy databases from each known version upgraded in one transaction. A forced failure on the final statement rolled back to the prior version, and the next open completed the upgrade. Pre-upgrade transactions report provenance `unknown`.
+
+## Measured boundary: parked history
+
+`ruby benchmark/shopify_operations.rb 50000` filled one shop's inbox with 50,000 parked rows, 50,000 processed rows and 1 eligible delivery.
+
+| Query | Plan | Mean |
+| --- | --- | --- |
+| Worker selection with `inbox_eligible` partial index | index scan of unfinished, unparked rows | 0.02 ms |
+| Same query through the older `inbox_ready` index | range search plus temporary B-tree sort | 5.9 ms |
+| Full `bin/shopify-status` report for the shop | | 37 ms |
+
+Without the partial index, worker selection cost grew with parked history. That finding is why the worker names `INDEXED BY inbox_eligible`: SQLite's planner chose `inbox_ready` without statistics.
+
+## Not run
+
+PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
+
 # Local verification on Ruby 3.4
 
 The baseline was GitHub commit `b648d7c`. The project directory initially belonged to an unrelated, uncommitted parent workspace. Its files matched a fresh clone of the published project. The project now has its own checkout and forward-only local branch, `codex/recovery-verification`. The published runtime migration already pinned Ruby 3.4.13 and supplied a lockfile for macOS ARM and Linux x86-64 GNU.
