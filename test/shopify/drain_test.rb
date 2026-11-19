@@ -80,6 +80,23 @@ class ShopifyDrainTest < Minitest::Test
     end
   end
 
+  def test_claim_of_a_dead_process_is_taken_over_but_a_live_claim_is_respected
+    ShopifyFixture.run do |run|
+      run.admin.order([ShopifyScenarios.sale])
+      run.with_endpoint { assert_equal 200, run.deliver("claimed") }
+      far = Time.now.to_i + 3600
+      run.read("UPDATE inbox SET claimed_by = ?, claimed_until = ?", [Process.pid, far])
+      assert_equal({ "processed" => 0, "retry" => 0, "parked" => 0, "status" => "idle" }, run.json("bin/shopify-worker", "--drain"))
+      assert_equal 0, run.admin.requests.size
+
+      dead = Process.spawn("true")
+      Process.wait(dead)
+      run.read("UPDATE inbox SET claimed_by = ?, claimed_until = ?", [dead, far])
+      assert_equal 1, run.json("bin/shopify-worker", "--drain").fetch("processed")
+      assert_equal [[1, nil, nil]], run.read("SELECT processed, claimed_by, claimed_until FROM inbox")
+    end
+  end
+
   def test_watch_processes_new_deliveries_and_stops_cleanly_on_sigterm
     ShopifyFixture.run do |run|
       run.admin.order([ShopifyScenarios.sale])
