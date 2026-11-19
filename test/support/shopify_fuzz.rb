@@ -25,7 +25,7 @@ module ShopifyFuzz
   WEIGHTS = {
     "deliver" => 18, "duplicate" => 6, "worker" => 16, "crash_before_commit" => 3, "crash_after_commit" => 3,
     "orphan_claim" => 3, "admin_fault" => 6, "mutate" => 16, "advance_time" => 5, "operator_retry" => 3,
-    "reconcile" => 5, "reconcile_failing_page" => 3, "backup" => 1, "maintain" => 1
+    "reconcile" => 5, "reconcile_failing_page" => 3, "backup" => 1, "maintain" => 1, "complete_pending" => 4
   }.freeze
   PROCESS_WEIGHTS = { "drain_processes" => 2, "kill_mid_fetch" => 2 }.freeze
 
@@ -239,17 +239,35 @@ module ShopifyFuzz
       shop, number = order_key(a, b)
       order = @orders.fetch([shop, number])
       kind = %w[SALE SALE CAPTURE REFUND REFUND AUTHORIZATION VOID][c % 7]
-      status = (c % 11).zero? ? "FAILURE" : "SUCCESS"
+      status = if (c % 11).zero? then "FAILURE" elsif (c % 13).zero? then "ERROR" elsif (c % 5).zero? then "PENDING" else "SUCCESS" end
       id = "gid://shopify/OrderTransaction/#{@counters[shop] += 1}"
       cents = (c / 7) % 10_000_000
       amount = format("%d.%02d", cents / 100, cents % 100)
       amount = "#{amount}#{c % 10}" if order[:currency] == "BHD"
-      transaction = ShopifyFixture.transaction(id, kind, amount, order[:currency], status)
-      order[:transactions] << transaction
-      @truth[[shop, id]] = { order: gid(number), kind: kind, status: status, amount: amount, currency: order[:currency] }
+      # Buyers may pay in another currency; that amount is stored, never converted.
+      presentment = (c / 17).even? ? [amount, order[:currency]] : [format("%d.%02d", cents / 70, cents % 100), "EUR"]
+      authorizations = order[:transactions].select { |existing| existing[:kind] == "AUTHORIZATION" }
+      parent = pick(authorizations, c)&.fetch(:id) if %w[CAPTURE VOID].include?(kind)
+      order[:transactions] << ShopifyFixture.transaction(id, kind, amount, order[:currency], status,
+                                                         presentment: presentment, parent: parent)
+      @truth[[shop, id]] = { order: gid(number), kind: kind, status: status, amount: amount, currency: order[:currency],
+                             presentment: presentment, parent: parent }
       arrange_truth(shop, number)
       # Shopify usually, but not always, sends a webhook for the change.
       op_deliver(a, b, (c / 3) % 4 * 3 + 1) unless (b % 4).zero?
+    end
+
+    def op_complete_pending(a, b, c)
+      pending = @truth.select { |_key, truth| truth[:status] == "PENDING" }.keys.sort
+      choice = pick(pending, a) or return
+      shop, id = choice
+      truth = @truth.fetch([shop, id])
+      number = Integer(truth[:order].split("/").last)
+      truth[:status] = "SUCCESS"
+      order = @orders.fetch([shop, number])
+      order[:transactions].map! { |existing| existing[:id] == id ? existing.merge(status: "SUCCESS") : existing }
+      arrange_truth(shop, number)
+      op_deliver(SHOPS.index(shop), number - 1, (c % 3) + 1) unless (b % 4).zero?
     end
 
     def op_advance_time(*)
@@ -325,19 +343,35 @@ module ShopifyFuzz
       return unless truth && truth[:status] == "SUCCESS" && ShopifyLedger::Payments::PAYMENT_KINDS.include?(truth[:kind])
 
       amount = BigDecimal(truth[:amount])
-      [truth[:order], truth[:currency], truth[:kind], ShopifyLedger::Payments.format_decimal(amount.abs)]
+      format = ShopifyLedger::Payments.method(:format_decimal)
+      [truth[:order], truth[:currency], truth[:kind], format.call(amount.abs),
+       truth[:presentment][1], format.call(BigDecimal(truth[:presentment][0])), truth[:parent]]
     end
 
     def check_invariants(path, live: true)
       # A SIGKILLed worker can leave a hot journal that only a writable connection may roll back.
       db = SQLite3::Database.new(path)
       db.busy_timeout(5000)
-      rows = db.execute("SELECT shop, transaction_id, order_id, currency, kind, amount FROM transactions")
+      rows = db.execute(<<~SQL)
+        SELECT shop, transaction_id, order_id, currency, kind, amount, presentment_currency, presentment_amount,
+               parent_transaction_id
+        FROM transactions
+      SQL
       keys = rows.map { |row| row.first(2) }
       fail!("a (shop, transaction_id) is stored twice") unless keys.uniq.size == keys.size
       rows.each do |shop, transaction_id, *stored|
         expected = expected_row(shop, transaction_id)
         fail!("stored #{shop} #{transaction_id} #{stored.inspect} is not in the ground truth (expected #{expected.inspect})") unless stored == expected
+      end
+      db.execute("SELECT shop, transaction_id, kind, status, amount, presentment_currency FROM payment_events").each do |shop, id, kind, status, amount, presentment|
+        truth = @truth[[shop, id]]
+        fail!("seen transaction #{shop} #{id} is not in the ground truth") unless truth
+        same = [kind, amount, presentment] == [truth[:kind], ShopifyLedger::Payments.format_decimal(BigDecimal(truth[:amount]).abs), truth[:presentment][1]]
+        fail!("seen transaction #{id} differs from the ground truth") unless same
+        # A stored status may lag the ground truth (an open status), but never contradict it.
+        unless status == truth[:status] || !ShopifyLedger::Payments::FINAL_STATUSES.include?(status)
+          fail!("transaction #{id} stored as #{status} but Shopify says #{truth[:status]}")
+        end
       end
       both = db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 1 AND parked_at IS NOT NULL")
       fail!("#{both} deliveries are both processed and parked") unless both.zero?
@@ -384,6 +418,9 @@ module ShopifyFuzz
       @storage.connect do |db|
         pending = db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0")
         fail!("#{pending} deliveries never completed") unless pending.zero?
+        stale = db.execute("SELECT shop, transaction_id, status FROM payment_events")
+                  .reject { |shop, id, status| @truth.fetch([shop, id])[:status] == status }
+        fail!("statuses still lag after settle: #{stale.first(3).inspect}") unless stale.empty?
         stored = db.execute("SELECT shop, transaction_id FROM transactions").to_set
         expected = @truth.keys.select { |shop, id| expected_row(shop, id) }.to_set
         fail!("missing after settle: #{(expected - stored).to_a.first(3).inspect}") unless (expected - stored).empty?

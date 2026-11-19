@@ -88,7 +88,8 @@ class ShopifyRecoveryRegressionTest < Minitest::Test
         []
       else
         [{ "id" => "gid://shopify/OrderTransaction/202", "kind" => "REFUND", "status" => "SUCCESS",
-           "amountSet" => { "shopMoney" => { "amount" => "25.00", "currencyCode" => "CAD" } } }]
+           "amountSet" => { "shopMoney" => { "amount" => "25.00", "currencyCode" => "CAD" },
+                             "presentmentMoney" => { "amount" => "25.00", "currencyCode" => "CAD" } } }]
       end
     end
 

@@ -16,8 +16,11 @@ module ShopifyFixture
   SECRET = "synthetic-shopify-test-secret".freeze
   PATH = "/admin/api/2026-10/graphql.json".freeze
 
-  def self.transaction(id, kind, amount, currency = "CAD", status = "SUCCESS")
-    { id: id, kind: kind, status: status, amountSet: { shopMoney: { amount: amount, currencyCode: currency } } }
+  def self.transaction(id, kind, amount, currency = "CAD", status = "SUCCESS", presentment: nil, parent: nil)
+    presentment ||= [amount, currency]
+    { id: id, kind: kind, status: status, parentTransaction: parent && { id: parent },
+      amountSet: { shopMoney: { amount: amount, currencyCode: currency },
+                   presentmentMoney: { amount: presentment[0], currencyCode: presentment[1] } } }
   end
 
   class Admin
