@@ -312,7 +312,10 @@ SIGKILLed mid-fetch.
 reconciliation. It needs `SHOPIFY_LEDGER_POSTGRES_URL`. Backups, maintenance
 and shop moves are SQLite-only, so on PostgreSQL they are no-ops. A dead
 worker's claim is a lease held by another machine, and "time passes" expires
-leases.
+leases. Every third worker step runs two workers at once on separate
+connections, so completions of one order race inside PostgreSQL. A run that
+does not finish within `SHOPIFY_FUZZ_RUN_TIMEOUT` seconds (default 120) counts
+as a failure, so a hang is shrunk and saved for replay like any other bug.
 With `--processes` it also starts 2–4 `bin/shopify-pg-worker --drain`
 processes with different machine IDs, and SIGKILLs a worker mid-fetch.
 

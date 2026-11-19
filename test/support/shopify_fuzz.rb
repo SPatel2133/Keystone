@@ -2,6 +2,7 @@ require "bigdecimal"
 require "fileutils"
 require "json"
 require "set"
+require "timeout"
 require_relative "shopify_fixture"
 %w[config storage inbox payments worker reconciliation deliveries backup maintenance move_shop].each do |name|
   require_relative "../../lib/shopify_ledger/#{name}"
@@ -40,8 +41,14 @@ module ShopifyFuzz
   end
 
   # Runs one operation list; returns nil on success or a failure hash.
+  # A run that stops making progress (a deadlock, a lost wakeup) fails like a
+  # broken invariant, so it is shrunk and written out for replay.
+  RUN_TIMEOUT = Float(ENV.fetch("SHOPIFY_FUZZ_RUN_TIMEOUT", "120"))
+
   def self.execute(ops, backend: :sqlite)
-    (backend == :postgres ? PostgresExecution : Execution).new(ops).call
+    Timeout.timeout(RUN_TIMEOUT, Failure, "run did not finish within #{RUN_TIMEOUT} s (deadlock or hang)") do
+      (backend == :postgres ? PostgresExecution : Execution).new(ops).call
+    end
     nil
   rescue Failure => error
     { "message" => error.message }
