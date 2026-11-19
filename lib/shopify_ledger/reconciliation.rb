@@ -49,7 +49,11 @@ module ShopifyLedger
       lock = nil
       begin
         lock = File.open(lock_path, File::RDWR | File::CREAT, mode)
-        File.chmod(mode, lock_path)
+        begin
+          File.chmod(mode, lock_path)
+        rescue Errno::EPERM
+          nil
+        end
       rescue Errno::EACCES, Errno::EROFS
         lock&.close
         lock = File.open(lock_path, File::RDONLY) if File.exist?(lock_path)
