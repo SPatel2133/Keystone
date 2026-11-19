@@ -35,6 +35,7 @@ module ShopifyLedger
       admin = Admin.new(@config, shop)
       loop do
         run = open_run(shop)
+        next if run == :retry
         return run if run.is_a?(String)
 
         checkpoint = finish(admin, shop, run)
@@ -74,8 +75,11 @@ module ShopifyLedger
           row = db.get_first_row(<<~SQL, [shop, lower.utc.iso8601, upper.iso8601, now, now])
             INSERT INTO reconciliation_runs (shop, window_start, window_end, status, started_at, updated_at)
             VALUES (?, ?, ?, 'running', ?, ?)
+            ON CONFLICT DO NOTHING
             RETURNING id, window_start, window_end, cursor, pages
           SQL
+          next :retry unless row
+
           build(row, resumed: false)
         end
       end
@@ -90,7 +94,7 @@ module ShopifyLedger
       filter = "updated_at:>='#{run.window_start}' updated_at:<='#{run.window_end}'"
       Log.event("reconciliation_started", shop: shop, run: run.id, window_start: run.window_start,
                                           window_end: run.window_end, resumed_after_pages: run.resumed ? run.pages : nil)
-      reconcile_orders(admin, shop, filter, run)
+      reconcile_orders(admin, shop, filter, run) unless run.resumed && run.cursor.nil? && run.pages.positive?
       checkpoint = complete(shop, run)
       Log.event("reconciliation_completed", shop: shop, run: run.id, synced_through: checkpoint)
       checkpoint
@@ -148,11 +152,11 @@ module ShopifyLedger
       restart = @first_request_of_resume
       @storage.connect do |db|
         @storage.transaction(db) do
-          db.execute(<<~SQL, [error.message, Time.now.to_i, restart ? 1 : 0, restart ? 1 : 0, run.id])
+          db.execute(<<~SQL, [error.message, Time.now.to_i, restart ? 1 : 0, run.pages, restart ? 1 : 0, run.pages, run.id])
             UPDATE reconciliation_runs
             SET status = 'failed', last_error = ?, updated_at = ?,
-                cursor = CASE WHEN ? THEN NULL ELSE cursor END,
-                pages = CASE WHEN ? THEN 0 ELSE pages END
+                cursor = CASE WHEN ? AND pages = ? THEN NULL ELSE cursor END,
+                pages = CASE WHEN ? AND pages = ? THEN 0 ELSE pages END
             WHERE id = ? AND status <> 'completed'
           SQL
         end

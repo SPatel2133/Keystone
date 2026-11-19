@@ -1,5 +1,6 @@
 require "minitest/autorun"
 require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/reconciliation"
 require_relative "../support/shopify_fixture"
 require_relative "../support/shopify_fuzz"
 
@@ -318,5 +319,41 @@ class ShopifyPostgresTest < Minitest::Test
       assert_equal({ "status" => "processed" }, JSON.parse(stdout))
       assert_equal [[1, nil, 0, 1]], @db.execute("SELECT processed, parked_at, attempts, requeues FROM inbox")
     end
+  end
+
+  def test_concurrent_first_reconciliation_run_retries_a_competing_insert
+    previous_http_setting = ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"]
+    ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
+    ShopifyFixture.run do |run|
+      run.admin.page([])
+      config_path = run.instance_variable_get(:@config_path)
+      config = ShopifyLedger::Config.new(JSON.parse(File.read(config_path)), File.dirname(config_path))
+      now = Time.now.utc
+      clock = -> { now }
+      window_start = (now - 7 * 24 * 60 * 60).iso8601
+      window_end = (now + 60).iso8601
+      other = ShopifyLedger::Postgres::Database.new(URL)
+      reconciliation = ShopifyLedger::Reconciliation.new(config, clock: clock, store: ShopifyLedger::Postgres::Store.new(@db))
+      read_checkpoint = reconciliation.method(:read_checkpoint)
+      inserted = false
+      reconciliation.stub(:read_checkpoint, lambda { |db, shop|
+        checkpoint = read_checkpoint.call(db, shop)
+        unless inserted
+          inserted = true
+          other.execute(<<~SQL, [ALPHA, window_start, window_end, now.to_i, now.to_i])
+            INSERT INTO reconciliation_runs (shop, window_start, window_end, status, started_at, updated_at)
+            VALUES (?, ?, ?, 'running', ?, ?)
+          SQL
+        end
+        checkpoint
+      }) do
+        assert_equal window_end, reconciliation.run(ALPHA)
+      end
+      assert_equal [["completed", 1, nil]], @db.execute("SELECT status, pages, cursor FROM reconciliation_runs")
+    ensure
+      other&.close
+    end
+  ensure
+    previous_http_setting ? ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = previous_http_setting : ENV.delete("SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK")
   end
 end
