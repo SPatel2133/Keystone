@@ -109,6 +109,20 @@ Five `bin/shopify-backup` copies were taken in sequence while 4 `--drain` worker
 
 All runs completed 300 of 300 deliveries with net CAD 100.00. With several workers, a few fetches are wasted. Claims are per delivery, so two workers can fetch the same order at once. The second worker's recheck then finds its delivery already completed and discards the result. These extra fetches cost no correctness.
 
+## Randomized crash testing (bin/shopify-fuzz)
+
+| Run | Operations | Failures | Time |
+| --- | --- | --- | --- |
+| `bin/shopify-fuzz --seed 100000 --runs 2000 --steps 300` | 600,000 | 0 | 3,114 s (51 min 54 s wall), max RSS 227 MB |
+| `--seed 1000 --runs 100 --steps 300` | 30,000 | 0 | 150 s |
+| CI fixed seeds: 25 × 200 in process, 3 × 60 with `--processes` | 5,180 | 0 | about 30 s |
+
+The 2,000-run campaign included 19,940 crashes before commit and 20,338 after commit. It also included 20,090 claims left by dead workers, 40,469 Admin faults, 20,161 reconciliation runs with a failing page, 6,799 backups checked against the oracle, and 6,656 maintenance runs.
+
+- **Oracle check:** a planted wrong stored amount is reported, and the operation list is shrunk until the planted operation is last.
+- **Harness issue found and fixed:** with `--processes`, a SIGKILLed worker can leave a hot rollback journal. A `readonly: true` reader then raises `SQLite3::ReadOnlyException`. The checker now uses a writable connection.
+- **No ledger bug was found.**
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
