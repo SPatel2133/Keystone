@@ -104,11 +104,17 @@ module ShopifyLedger
       id, shop, order_id, attempts, webhook_id = delivery
       raise Admin::Error, "Delivery shop is no longer configured" unless @config.shop?(shop)
 
+      # Deliveries for this order committed before the fetch starts are answered
+      # by the order's state in that fetch, so they can be completed with it.
+      fence = @storage.connect do |db|
+        db.get_first_value("SELECT MAX(id) FROM inbox WHERE shop = ? AND order_id = ?", [shop, order_id])
+      end
       transactions = Admin.new(@config, shop).order_transactions(order_id)
       entries = Payments.entries(transactions)
 
       applied = false
       recorded = 0
+      coalesced = 0
       result = @storage.connect do |db|
         # Another worker may have finished while this one was fetching.
         Storage.transaction(
@@ -127,13 +133,20 @@ module ShopifyLedger
                              last_attempt_at = ?, processed_at = ?, claimed_by = NULL, claimed_until = NULL
             WHERE id = ?
           SQL
+          db.execute(<<~SQL, [now, now, shop, order_id, id, fence])
+            UPDATE inbox SET processed = 1, next_attempt_at = 0, last_error = NULL,
+                             last_attempt_at = ?, processed_at = ?, claimed_by = NULL, claimed_until = NULL
+            WHERE shop = ? AND order_id = ? AND processed = 0 AND parked_at IS NULL AND id <> ? AND id <= ?
+          SQL
+          coalesced = db.changes
           applied = true
           "processed"
         end
       end
       if result
         Log.event("delivery_processed", shop: shop, delivery: webhook_id, order: order_id,
-                                        attempt: attempts + 1, recorded_transactions: recorded)
+                                        attempt: attempts + 1, recorded_transactions: recorded,
+                                        coalesced_deliveries: coalesced)
       end
       result
     rescue Admin::Error, Payments::Error, SQLite3::Exception => error

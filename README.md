@@ -122,11 +122,18 @@ delivery was deferred or parked, or if storage failed.
 
 Several workers can drain one database at once. Each worker claims a delivery
 in a short write transaction before fetching it, so concurrent workers never
-spend Admin API calls on the same order. A claim lasts for the longest
+spend Admin API calls on the same delivery. A claim lasts for the longest
 possible fetch. If the claiming process has exited, another worker takes the
 claim over immediately, so a killed worker's delivery is retried at once.
 Workers wait up to 5 s for the SQLite write lock. The webhook keeps a 250 ms
 wait so that it can answer 503 well within Shopify's delivery timeout.
+
+Shopify often sends several `orders/updated` webhooks for one order in quick
+succession. Every delivery for the order that was committed before a fetch
+started is answered by that fetch, so the worker completes those deliveries in
+the same transaction as the payments (`coalesced_deliveries` in the log). A
+delivery that arrives during the fetch is newer than the fetched state, so it
+gets its own fetch. Parked deliveries are never completed this way.
 
 Each Admin API request is retried inside one attempt on HTTP 429, 500, 502,
 503 and 504, on GraphQL `THROTTLED`, and on connection errors. Waits are 0.25 s

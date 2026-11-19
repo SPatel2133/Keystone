@@ -92,6 +92,10 @@ Five `bin/shopify-backup` copies were taken in sequence while 4 `--drain` worker
 
 `bin/shopify-worker --watch` processed a delivery that arrived after it started. On SIGTERM it exited 0 with `{"processed":1,"retry":0,"parked":0,"status":"stopped"}`. The test is `test_watch_processes_new_deliveries_and_stops_cleanly_on_sigterm`. Final local counts at this point: `bin/check` 29 / 483 and `bin/shopify-check` 50 / 620, with no failures, errors or skips.
 
+## Same-order coalescing
+
+`test_one_fetch_completes_earlier_deliveries_for_the_order_but_not_later_ones` sends three deliveries for one order and injects a fourth while the first fetch is in flight. The result was 2 Admin fetches, all 4 deliveries processed, and the exact final totals. The existing `test_duplicate_reversed_deliveries_and_shop_currency_isolation` now expects 2 fetches for 4 deliveries across two shops, down from 4. Cross-shop deliveries are never coalesced.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.

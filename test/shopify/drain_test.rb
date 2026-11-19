@@ -80,6 +80,33 @@ class ShopifyDrainTest < Minitest::Test
     end
   end
 
+  def test_one_fetch_completes_earlier_deliveries_for_the_order_but_not_later_ones
+    ShopifyFixture.run do |run|
+      run.admin.order([ShopifyScenarios.sale])
+      run.with_endpoint do
+        assert_equal 200, run.deliver("update-1")
+        assert_equal 200, run.deliver("update-2")
+        assert_equal 200, run.deliver("refund-1", topic: "refunds/create")
+        sent = false
+        run.admin.arrange(ALPHA, "OrderPayments", ORDER, { data: { order: {
+          id: ORDER, transactions: [ShopifyScenarios.sale], transactionsCount: { count: 1, precision: "EXACT" }
+        } } }) do
+          next if sent
+
+          sent = true
+          # Arrives while the first fetch is in flight, so that fetch may predate it.
+          assert_equal 200, run.deliver("update-during-fetch")
+          run.admin.order([ShopifyScenarios.sale, ShopifyScenarios.refund])
+        end
+        counts = run.json("bin/shopify-worker", "--drain")
+        assert_equal 2, counts.fetch("processed")
+      end
+      assert_equal 2, run.admin.requests.count { |request| request["operation"] == "OrderPayments" }
+      assert_equal [[4]], run.read("SELECT SUM(processed) FROM inbox")
+      assert_equal ShopifyScenarios::AFTER, run.summary
+    end
+  end
+
   def test_claim_of_a_dead_process_is_taken_over_but_a_live_claim_is_respected
     ShopifyFixture.run do |run|
       run.admin.order([ShopifyScenarios.sale])
