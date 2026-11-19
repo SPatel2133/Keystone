@@ -53,6 +53,9 @@ module ShopifyLedger
     RETRY_STATUSES = [429, 500, 502, 503, 504].freeze
     BASE_DELAY = 0.25
     MAX_DELAY = 2.0
+    OPEN_TIMEOUT = 5
+    READ_TIMEOUT = 10
+    WRITE_TIMEOUT = 5
 
     def self.delay(attempt, retry_after = nil)
       requested = retry_after || BASE_DELAY * (2**(attempt - 1))
@@ -138,9 +141,9 @@ module ShopifyLedger
     def request_once(operation, query, variables)
       http = Net::HTTP.new(@endpoint.hostname, @endpoint.port, nil)
       http.use_ssl = @endpoint.scheme == "https"
-      http.open_timeout = 5
-      http.read_timeout = 10
-      http.write_timeout = 5
+      http.open_timeout = OPEN_TIMEOUT
+      http.read_timeout = READ_TIMEOUT
+      http.write_timeout = WRITE_TIMEOUT
 
       post = Net::HTTP::Post.new(@endpoint.request_uri)
       post["Content-Type"] = "application/json"

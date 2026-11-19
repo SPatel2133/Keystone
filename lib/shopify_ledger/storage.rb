@@ -47,6 +47,8 @@ module ShopifyLedger
       "ALTER TABLE inbox ADD COLUMN processed_at INTEGER",
       "ALTER TABLE inbox ADD COLUMN parked_at INTEGER",
       "ALTER TABLE inbox ADD COLUMN requeues INTEGER NOT NULL DEFAULT 0 CHECK (requeues >= 0)",
+      "ALTER TABLE inbox ADD COLUMN claimed_by INTEGER",
+      "ALTER TABLE inbox ADD COLUMN claimed_until INTEGER",
       "ALTER TABLE transactions ADD COLUMN recorded_at INTEGER",
       "ALTER TABLE transactions ADD COLUMN source TEXT",
       <<~SQL.chomp,
@@ -101,13 +103,16 @@ module ShopifyLedger
       SQL
     end
 
-    def initialize(path)
+    # Webhooks keep the short default so a locked file returns 503 well within
+    # Shopify's delivery timeout; background workers can afford to wait.
+    def initialize(path, busy_timeout: 250)
       @path = path
+      @busy_timeout = busy_timeout
     end
 
     def connect
       db = SQLite3::Database.new(@path)
-      db.busy_timeout(250)
+      db.busy_timeout(@busy_timeout)
       prepare_schema(db) unless self.class.catalog(db) == self.class.catalogs.last
       yield db
     ensure

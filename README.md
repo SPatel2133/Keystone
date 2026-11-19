@@ -105,6 +105,7 @@ From another terminal with the same configuration:
 
 ```sh
 bin/shopify-worker --once
+bin/shopify-worker --drain            # until idle; add --limit N to cap outcomes
 bin/shopify-summary example.myshopify.com
 bin/reconcile example.myshopify.com
 ```
@@ -113,7 +114,17 @@ bin/reconcile example.myshopify.com
 `retry` or `parked`. A retry exits nonzero and defers the delivery for 2, 4, 8,
 16, 32, then at most 60 seconds per attempt. The worker selects the oldest
 eligible delivery and can process other orders while a failure backs off.
-Invoke the worker repeatedly to drain the inbox.
+`--drain` repeats until no delivery is eligible and prints counts such as
+`{"processed":12,"retry":1,"parked":0,"status":"idle"}`. It exits 1 if any
+delivery was deferred or parked, or if storage failed.
+
+Several workers can drain one database at once. Each worker claims a delivery
+in a short write transaction before fetching it, so concurrent workers never
+spend Admin API calls on the same order. A claim lasts for the longest
+possible fetch. If the claiming process has exited, another worker takes the
+claim over immediately, so a killed worker's delivery is retried at once.
+Workers wait up to 5 s for the SQLite write lock. The webhook keeps a 250 ms
+wait so that it can answer 503 well within Shopify's delivery timeout.
 
 Each Admin API request is retried inside one attempt on HTTP 429, 500, 502,
 503 and 504, on GraphQL `THROTTLED`, and on connection errors. Waits are 0.25 s
@@ -212,6 +223,8 @@ The doctor reads the caller's ledger in one SQLite snapshot. Here the applied ba
 Doctor supports the original ledger's rollback journal. It reports a missing ledger without creating a file and refuses externally configured WAL mode before SQLite can create sidecars.
 
 ## Benchmark
+
+`ruby benchmark/shopify_drain.rb` drains 200 deliveries against a fake Admin API that answers in 50 ms. One worker processed 17.9 deliveries/s and eight processed 122.8/s, with exactly one fetch per delivery ([results](VERIFICATION.md#concurrent-workers)).
 
 `ruby benchmark/shopify_operations.rb` times Shopify worker selection and `bin/shopify-status` against 50,000 parked and 50,000 processed deliveries ([results](VERIFICATION.md#measured-boundary-parked-history)).
 

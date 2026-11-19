@@ -6,14 +6,7 @@ module ShopifyLedger
   module CLI
     def self.run(command, arguments, **hooks)
       STDOUT.sync = true
-      if command == :worker
-        raise ArgumentError, "usage: bin/shopify-worker --once" unless arguments == ["--once"]
-
-        require_relative "worker"
-        status = Worker.new(Config.load).run_once(**hooks)
-        puts JSON.generate(status: status)
-        return %w[retry parked].include?(status) ? 1 : 0
-      end
+      return worker(arguments, hooks) if command == :worker
 
       return deliveries(arguments) if command == :deliveries
       return status(arguments) if command == :status
@@ -38,6 +31,35 @@ module ShopifyLedger
     rescue StandardError => error
       warn "shopify ledger: #{error.class}: #{error.message}"
       1
+    end
+
+    # --once prints one outcome; --drain prints counts and stops when idle.
+    # Both exit 1 when any delivery was deferred or parked.
+    def self.worker(arguments, hooks)
+      usage = "usage: bin/shopify-worker --once | --drain [--limit N]"
+      limit = nil
+      case arguments
+      in ["--once"]
+      in ["--drain"]
+      in ["--drain", "--limit", String => count]
+        limit = Integer(count, 10, exception: false)
+        raise ArgumentError, usage unless limit&.between?(1, 1_000_000)
+      else
+        raise ArgumentError, usage
+      end
+      raise ArgumentError, usage if hooks.any? && arguments != ["--once"]
+
+      require_relative "worker"
+      worker = Worker.new(Config.load)
+      if arguments == ["--once"]
+        status = worker.run_once(**hooks)
+        puts JSON.generate(status: status)
+        return %w[retry parked].include?(status) ? 1 : 0
+      end
+
+      counts = worker.drain(limit: limit)
+      puts JSON.generate(counts)
+      counts.values_at("retry", "parked").sum.zero? && counts["status"] != "storage_error" ? 0 : 1
     end
 
     # Exit 0 when every shop is healthy, 2 when any shop needs attention.

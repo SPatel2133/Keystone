@@ -38,6 +38,27 @@ The block in "Reproduce the integrated run" ran from a scratch directory whose p
 
 Without the partial index, worker selection cost grew with parked history. That finding is why the worker names `INDEXED BY inbox_eligible`: SQLite's planner chose `inbox_ready` without statistics.
 
+## Concurrent workers
+
+`bin/shopify-worker --drain` was run by 1, 2, 4 and 8 processes over 200 deliveries for 200 orders.
+
+- **Before claims (found defect).** With an instant fake Admin API, totals were exact, but Admin fetches were 200, 314, 456 and 614. Workers raced on the same oldest row, and the loser's fetch was discarded. Wall time stayed about 0.8–1.1 s, so the extra workers gained nothing.
+- **Before raising the worker's busy timeout (found defect).** Once claims added a write per selection, 4 and 8 workers sometimes hit `SQLite3::BusyException` at the 250 ms timeout. One worker stopped with `storage_error`, or a delivery was deferred 2 s after a wasted fetch. Raising the worker's timeout to 5 s fixed it. Three repeated runs at each worker count then succeeded with 200 fetches and net CAD 200.00.
+- **After.** `ruby benchmark/shopify_drain.rb 200 50` uses a fake Admin API that answers in 50 ms.
+
+| Workers | Admin fetches | Seconds | Deliveries/s |
+| --- | --- | --- | --- |
+| 1 | 200 | 11.14 | 17.9 |
+| 2 | 200 | 5.61 | 35.6 |
+| 4 | 200 | 2.92 | 68.5 |
+| 8 | 200 | 1.63 | 122.8 |
+
+`test/shopify/drain_test.rb` checks the following:
+- Four concurrent drains over 40 deliveries apply each delivery once with exactly 40 fetches, and no claim is left over.
+- A worker started mid-fetch finds nothing to claim.
+- `--limit` and the exit codes behave as documented.
+- The existing worker kill tests at both seams still recover immediately, because a dead claimant's claim is taken over.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
