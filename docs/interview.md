@@ -54,9 +54,15 @@ Run `test/whiteboard` from the project root to compare the deliberately broken s
 **PostgreSQL workers.** *What:* `bin/shopify-pg-worker` claims deliveries with `FOR UPDATE SKIP LOCKED` and a 60 s lease, then applies the shared payment rules through a small adapter. *Why:* SQLite claims rely on PID liveness, which only works on one host. SKIP LOCKED lets many machines pick different rows without waiting on each other. *Tradeoffs:*
 - A dead worker's delivery waits up to the lease length before another worker takes it.
 - Applying payments is idempotent, so a worker whose lease expired mid-fetch can at worst repeat a fetch. It cannot double-count.
-- Only the worker path is ported. Ingest, reconciliation and the operator tools would follow the same adapter.
+- Ingest (`SHOPIFY_LEDGER_INBOX=postgres`), the worker and reconciliation (through `Postgres::Store`) are ported. The operator tools still read SQLite.
 
 **Moving a shop between databases.** *What:* `bin/shopify-move-shop` copies and verifies, then switches the route, then cleans up. Each step is idempotent, and a crash test covers each seam. *Why:* sharding by shop means a shop eventually has to move without losing or double-counting money. *Tradeoffs:*
 - The route lives in the config file, so running processes must be restarted, and ingest must pause during the move.
 - With a central routing table and a per-shop write fence, the move could run online.
 - Cleanup refuses rather than merging when the old copy changed. Merging two inboxes automatically is exactly where silent loss would hide.
+
+**What the fuzzer found (a story to tell).** When shop moves were added to the fuzzer's operations, the second campaign failed within seconds. The shrinker cut it down to a move that crashed after copying, followed by ordinary work on the old route, then a settle.
+- **First bug:** cleanup compared the orphan copy with the routed copy for exact equality, so a copy that had gone stale was refused forever. The fix asks a different question: does the old database hold any delivery or payment that the routed copy lacks? A stale copy loses nothing; an unknown delivery needs an operator.
+- **Second bug:** a worker draining the old database kept processing the stale copy's deliveries. Claims now skip shops routed elsewhere.
+
+Each bug got a focused regression test before the fix. *Lesson:* the example tests covered each crash seam on its own. The bugs needed a crash followed by more normal traffic, which is exactly the combination a random sequence produces and a hand-written test does not.
