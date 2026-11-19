@@ -25,10 +25,10 @@
   },
   "ordered": {
     "samples": 100000,
-    "elapsed_ms": 26458.047,
-    "acknowledgments_per_second": 3779.5684617235734,
-    "p50_ms": 0.245,
-    "p95_ms": 0.348,
+    "elapsed_ms": 26914.269,
+    "acknowledgments_per_second": 3715.5012458261454,
+    "p50_ms": 0.251,
+    "p95_ms": 0.346,
     "final_state": {
       "cursor": 100000,
       "balance": 100000,
@@ -53,10 +53,10 @@
   },
   "identical_retries": {
     "samples": 100000,
-    "elapsed_ms": 6472.666,
-    "acknowledgments_per_second": 15449.58445252698,
-    "p50_ms": 0.06,
-    "p95_ms": 0.073,
+    "elapsed_ms": 6258.423,
+    "acknowledgments_per_second": 15978.466140751432,
+    "p50_ms": 0.059,
+    "p95_ms": 0.067,
     "final_state": {
       "cursor": 100000,
       "balance": 100000,
@@ -65,7 +65,7 @@
   },
   "gap_closure": {
     "samples": 1,
-    "elapsed_ms": 21.821,
+    "elapsed_ms": 22.549,
     "before_close": {
       "cursor": 0,
       "balance": 0,
@@ -80,10 +80,10 @@
   },
   "cli_ordered": {
     "samples": 20,
-    "elapsed_ms": 1438.432,
-    "acknowledgments_per_second": 13.904028831394184,
-    "p50_ms": 71.656,
-    "p95_ms": 73.106,
+    "elapsed_ms": 1394.193,
+    "acknowledgments_per_second": 14.345216193166943,
+    "p50_ms": 69.363,
+    "p95_ms": 71.533,
     "final_state": {
       "cursor": 20,
       "balance": 20,

@@ -1,6 +1,78 @@
-# Verification
+# Local verification on Ruby 3.4
 
-The final source passed on macOS arm64 with Ruby 2.6.10, RubyGems 3.0.3.1, Bundler 1.17.2, sqlite3 gem 1.3.13, SQLite 3.51.0, Minitest 5.11.3, and Python 3.9.6.
+The baseline was GitHub commit `b648d7c`. The project directory initially belonged to an unrelated, uncommitted parent workspace. Its files matched a fresh clone of the published project. The project now has its own checkout and forward-only local branch, `codex/recovery-verification`. The published runtime migration already pinned Ruby 3.4.13 and supplied a lockfile for macOS ARM and Linux x86-64 GNU.
+
+## Baseline
+
+From a new directory with `BUNDLE_GEMFILE` and `RUBYOPT` unset, ran `"$project/bin/check"` (22 tests, 300 assertions), `"$project/bin/shopify-check"` (20 tests, 153 assertions), `"$project/bin/demo"`, `"$project/bin/inventory-demo"`, and `"$project/bin/shopify-demo"`. All passed. There were zero failures, errors, or skips. Both ledger crash seams produced signal 9 with empty stdout; inventory closed at 25 units and the Shopify demo closed at CAD 75.00.
+
+## Reproduce the integrated run
+
+Start in the project checkout with the Ruby in `.ruby-version` active. All databases below are disposable. Copying the three dependency input files makes the clean installation independent of checkout-local Bundler configuration.
+
+```sh
+set -eu
+project="$PWD"
+scratch="$(mktemp -d)"
+unset RUBYOPT BUNDLE_GEMFILE
+export BUNDLE_FROZEN=true BUNDLE_PATH="$scratch/bundle" BUNDLE_APP_CONFIG="$scratch/bundle-config"
+mkdir "$scratch/setup" "$scratch/caller"
+cp Gemfile Gemfile.lock .ruby-version "$scratch/setup/"
+(cd "$scratch/setup" && bundle install && bundle check)
+cd "$scratch/caller"
+printf '%s\n' '{"op":"deliver","seq":1,"delta":99}' | "$project/bin/ledger"
+shasum -a 256 ledger.sqlite3 > "$scratch/caller.sha"
+"$project/bin/check"
+"$project/bin/shopify-check"
+for repeat in 1 2 3 4 5; do "$project/bin/check" -n /concurrent_delivery/; done
+"$project/bin/check" -n /MaintenanceTest/
+"$project/bin/check" -n /seeded_delivery/
+LEDGER_SEEDS=1,2,3,4,5,6,7,8,9,10 "$project/bin/check" -n /seeded_delivery/
+"$project/bin/demo"
+"$project/bin/inventory-demo"
+"$project/bin/shopify-demo"
+"$project/test/whiteboard"
+"$project/bin/benchmark" --smoke > "$scratch/smoke.json"
+"$project/bin/benchmark" --full > "$scratch/full.json"
+"$project/bin/demo" --evidence > "$scratch/evidence.jsonl"
+"$project/bin/shopify-demo" --evidence > "$scratch/shopify-evidence.jsonl"
+shasum -a 256 -c "$scratch/caller.sha"
+```
+
+## Results and failure log
+
+- Clean frozen install on macOS arm64 loaded Ruby 3.4.13, Bundler 4.1.0, SQLite 3.54.1, sqlite3 gem 2.10.2 (native arm64-darwin), Minitest 5.27.0, WEBrick 1.9.2, BigDecimal 4.1.3 and Base64 0.3.0. The verified Ruby executable was `/opt/homebrew/Cellar/ruby@3.4/3.4.13/bin/ruby`. The lockfile also includes x86_64-linux-gnu. Ubuntu 22.04 x64 is configured; its [Ruby build artifact](https://github.com/ruby/ruby-builder/releases/download/ruby-3.4.13/ruby-3.4.13-ubuntu-22.04-x64.tar.gz) was available. Hosted execution for the local commit is unrun.
+- Final integrated workflow on macOS: original and extended suite **29 tests / 483 assertions**; Shopify **20 / 153**. Zero failures, errors, or skips. The workflow shell body was extracted from YAML, syntax-checked with Bash, and executed with the clean bundle. Actionlint 1.7.12 also validated the workflow.
+- Five focused contention runs passed (1 test / 8 assertions each). Every reservation forced five real busy receipts with no partial write. Default randomized seeds passed 1 / 129; seeds 1–10 passed 1 / 430. Maintenance passed 4 / 38. These focused counts repeat coverage included in the integrated suites.
+- `bin/demo`, `bin/inventory-demo`, `bin/shopify-demo`, `test/whiteboard`, both evidence commands, and both benchmark modes passed. A real scratch caller ledger seeded with `1:+99` had the same SHA-256 before and after. The demo and benchmark commands also completed from a caller directory with spaces in the checkout path.
+- **Harness defect during development.** `bin/check -n /concurrent_delivery/` initially produced EACCES instead of a receipt when the executable path contained a space. Passing an explicit executable/argv pair to Open3 fixed invocation. The five repeated checks above passed.
+- **Deliberate transaction failure.** `test/whiteboard` creates its own broken project copy. Its rollback assertion expected rows 1 and 3 but observed 1, 2 and 3 with checkpoint `(1,"5")`. Replay returned duplicate with balance 5. The intact executable passed the identical assertion; replay was accepted with balance 6. [Interview walkthrough](docs/interview.md)
+- **Deliberate history loss.** `bin/check -n /pruning_an_applied_row/` deletes applied identity `1:+10` only in a scratch fixture. Submitting `1:-99` then returns accepted and retains the stale balance 10. The maintenance implementation retains every row; matching and conflicting retries survived VACUUM unchanged.
+- **Ranked follow-up checks.** (1) False acknowledgment after simultaneous replay: after losing the receipt for `2:-1`, race two matching senders against `2:-9`. Five independent trials returned two duplicates and one conflict, and separate SQLite reads retained balance 6. (2) Integer overflow on gap closure: with 1 and 3 both at INT64_MAX, deliver `2:+1` at both seams. Final balance was exactly 18,446,744,073,709,551,615. (3) Measurement and setup: the public CLI benchmark includes interpreter startup, full duplicate replay preserves 100,000 identities, and installation from an empty bundle succeeded. These probes found no additional production defect.
+- The local gem was built from an explicit four-file allowlist, installed in an empty GEM_HOME with the locked sqlite3 gem, and invoked from an unrelated directory. Actual receipts were accepted/accepted/accepted/duplicate/conflict with a final balance of 6. The gem was not published. PostgreSQL implementation and backend equivalence checks are unrun.
+
+## Reproduce the isolated gem install
+
+After the clean bundle installation above, run:
+
+```sh
+cd "$project"
+gem build sequence-ledger.gemspec --output "$scratch/sequence-ledger.gem"
+export GEM_HOME="$scratch/gem-home" GEM_PATH="$scratch/gem-home"
+gem install --local "$BUNDLE_PATH"/ruby/3.4.0/cache/sqlite3-*.gem "$scratch/sequence-ledger.gem" --no-document
+gem contents sequence-ledger
+mkdir "$scratch/gem-caller"
+cd "$scratch/gem-caller"
+printf '%s\n' '{"op":"deliver","seq":1,"delta":5}' | "$GEM_HOME/bin/sequence-ledger"
+```
+
+## Repository metadata draft
+
+The public repository description observed during this run was “A crash-safe local event consumer in Ruby and SQLite.” Its default branch was `main` and its topic list was empty. Proposed description: “Ruby and SQLite event consumers for crash-safe inventory updates and Shopify order and refund reconciliation.” Proposed topics: `ruby`, `sqlite`, `shopify`, `idempotency`, `webhooks`, `fault-tolerance`. This run did not publish commits, open a PR, or change public metadata.
+
+# Historical verification on Ruby 2.6
+
+The earlier release passed on macOS arm64 with Ruby 2.6.10, RubyGems 3.0.3.1, Bundler 1.17.2, sqlite3 gem 1.3.13, SQLite 3.51.0, Minitest 5.11.3, and Python 3.9.6.
 
 ## Setup and local checks
 

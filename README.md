@@ -1,20 +1,45 @@
 # Crash-safe event processing in Ruby and SQLite
 
-This project implements two event consumers. The Shopify ledger tracks sales and refunds by shop and currency, handles webhook retries, and reconciles missed deliveries. The sequence ledger applies inventory adjustments in order, including when a scan arrives late or a process dies after committing.
+This Ruby consumer keeps a running balance correct when events arrive out of order, arrive twice, or commit just before the sender loses its acknowledgment.
 
-## Quick start
+[![Verify event consumers](https://github.com/SPatel2133/ruby-event-consumer/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/SPatel2133/ruby-event-consumer/actions/workflows/verify.yml?query=branch%3Amain)
 
-With Ruby 3.4.13 active, from the repository root install the locked dependencies and run both synthetic demos. The Shopify demo uses local fixtures and requires no merchant credentials.
+With Ruby 3.4.13 active, reproduce the crash demo from the project root:
 
 ```sh
-bundle check || bundle install
-bin/shopify-demo
-bin/inventory-demo
+bundle install && bin/demo
 ```
 
-In the Shopify demo, a 100.00 sale and a 25.00 refund leave 75.00 after replay. In the warehouse demo, the final count is 25 units after a missing scan arrives and the sender retries. Run `bin/check` and `bin/shopify-check` for the regression suites.
+The cursor is the last sequence applied to the balance. Sequence 3 can be durable while the cursor waits at 1. Each kill below starts from that same gap on a fresh database.
 
-[Shopify ledger](#shopify-order-and-refund-ledger) · [Inventory walkthrough](#warehouse-inventory-walkthrough) · [Benchmark](#benchmark) · [Verification notes](VERIFICATION.md)
+```text
+  1, delta 5 -> {"status":"accepted","seq":1,"cursor":1,"balance":5}
+  3, delta 2 -> {"status":"accepted","seq":3,"cursor":1,"balance":5}
+  2, delta -1 -> {"status":"accepted","seq":2,"cursor":3,"balance":6}
+
+Kill before_commit on a separately seeded ledger
+  Signal 9, 0 stdout bytes
+  SQLite before retry: {"events":[[1,5],[3,2]],"checkpoint":[1,"5"]}
+  Retry 2:-1 -> {"status":"accepted","seq":2,"cursor":3,"balance":6}
+Kill after_commit_before_ack on a separately seeded ledger
+  Signal 9, 0 stdout bytes
+  SQLite before retry: {"events":[[1,5],[2,-1],[3,2]],"checkpoint":[3,"6"]}
+  Retry 2:-1 -> {"status":"duplicate","seq":2,"cursor":3,"balance":6}
+
+Try to change event 3 to +9 -> {"error":"conflict","seq":3}
+```
+
+```mermaid
+flowchart LR
+    A[stdin request] --> B[Validate] --> C[BEGIN IMMEDIATE]
+    C --> D[Record event and drain contiguous keys] --> E[Write checkpoint]
+    E -->|SIGKILL before_commit| F[COMMIT]
+    F -->|SIGKILL after_commit_before_ack| G[Emit receipt]
+```
+
+Run `bin/shopify-demo` for the merchant example: a CAD 100.00 sale and CAD 25.00 refund produce CAD 75.00 net after crash recovery or reconciliation. Both demos use disposable databases.
+
+[Machine trace](evidence.jsonl) · [90-second whiteboard walkthrough](docs/interview.md) · [Benchmark](#benchmark) · [Verification](VERIFICATION.md)
 
 ## Shopify order and refund ledger
 
@@ -135,19 +160,31 @@ The doctor reads the caller's ledger in one SQLite snapshot. Here the applied ba
 
 Doctor supports the original ledger's rollback journal. It reports a missing ledger without creating a file and refuses externally configured WAL mode before SQLite can create sidecars.
 
-### Benchmark
+## Benchmark
 
-Run `"$project/bin/benchmark"` from any working directory. Each workload gets its own scratch database. The command checks the durable cursor, adjustment balance, and unique event count before printing JSON.
+Run `bin/benchmark --full` for the 100,000-event workload, or `bin/benchmark --smoke` to check the same paths quickly. This single-writer sample used an Apple M5 with 16 GiB, Ruby 3.4.13 and SQLite 3.54.1.
 
-- **Ordered deliveries** averaged 3,392 acknowledgments/s over 1,000 new events. Median latency was 0.278 ms and p95 was 0.391 ms.
-- **Identical retries** averaged 12,062 acknowledgments/s over 1,000 retries. Median latency was 0.078 ms and p95 was 0.087 ms. Both batches finished with 1,000 unique events, cursor 1,000 and balance 1,000.
-- **Gap closure** took 23.932 ms for one delivery. Sequences 2 through 10,001 were already durable when the timer started. Sequence 1 applied all 10,000 buffered events and itself, leaving cursor, balance, and unique event count at 10,001.
+| Measured boundary | Samples | Throughput | p50 / p95 |
+| --- | ---: | ---: | ---: |
+| Ordered inserts, in-process | 100,000 | 3,716/s | 0.251 / 0.346 ms |
+| Identical retries, in-process | 100,000 | 15,978/s | 0.059 / 0.067 ms |
+| Ordered inserts, fresh CLI process per event | 20 | 14.35/s | 69.363 / 71.533 ms |
 
-This sample used one writer on an Apple M5 MacBook Air with 16 GB RAM, macOS 26.5.1, Ruby 2.6.10, SQLite 3.51.0, sqlite3 gem 1.3.13 and Bundler 1.17.2. A monotonic clock measures the in-process ledger call, including database open, schema check, commit and close. Ruby startup, JSON parsing, output, fixture setup and verification are outside the timer. End-to-end CLI latency and concurrent throughput were unmeasured. [Full observed results](benchmark/results.json)
+Each in-process call opens SQLite, takes a write reservation, commits one request and closes the database. CLI timing also includes spawning Ruby, loading Bundler, parsing and emitting JSON, and waiting for exit. With 10,000 events already buffered, one in-process gap-closing delivery took **22.549 ms**. Setup and state verification run outside the timer.
+
+The initialized database grew from 12,288 to 901,120 bytes, or **888,832 bytes for 100,000 unique events** (8.89 bytes/event with these integer keys and +1 payloads). Replaying all 100,000 left the row count at 100,000. Rollback journal mode was DELETE, synchronous was FULL (2), and pages were 4,096 bytes. All measured sidecars were absent after close. No WAL checkpoint ran. [Full machine-readable sample](benchmark/results.json)
+
+## Optional storage maintenance
+
+Run `bin/maintain /path/to/ledger.sqlite3` during a quiet period. It validates the existing schema under an exclusive lock and runs SQLite VACUUM. A missing path or busy writer yields a diagnostic and a nonzero exit. Ordinary delivery never runs maintenance.
+
+With 257 free pages, the test database shrank from 1,064,960 to 12,288 bytes. A fully live 12,288-byte fixture stayed the same size. All event identities survive, including pending rows. Deleting applied rows would let a conflicting historical retry be accepted with a different delta. Inspect the scratch reproduction with `bin/check -n /MaintenanceTest/`. [Maintenance tests](test/maintenance_test.rb)
 
 ## Setup and original demo
 
 Tested on macOS arm64 with Ruby 3.4.13, Bundler 4.1.0, sqlite3 gem 2.10.2, and Minitest 5.27.0.
+
+Linux CI is configured for Ubuntu 22.04. To try the sequence CLI as an installed RubyGem, see the [local gem installation](VERIFICATION.md#reproduce-the-isolated-gem-install).
 
 Run these commands from the project directory.
 
