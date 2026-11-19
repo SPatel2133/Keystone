@@ -8,7 +8,7 @@ flowchart LR
   W -->|"INSERT inbox ON CONFLICT (shop, webhook_id) DO NOTHING; commit, then 200"| I[(inbox)]
   I -->|"claim: PID lease (SQLite) or FOR UPDATE SKIP LOCKED lease (PostgreSQL)"| K[worker]
   K -->|"order transactions, outside any write transaction"| A[Admin GraphQL 2026-10]
-  K -->|"one transaction: payment_events + transactions + inbox completion (same-order fence)"| L[(ledger)]
+  K -->|"one transaction: lock same-order rows up to the fence in id order, then payment_events + transactions + inbox completion"| L[(ledger)]
   R[bin/reconcile] -->|"fixed UPDATED_AT window, page cursor saved per page"| A
   R -->|"same Payments.apply"| L
   L --> O[status / audit / summary / Prometheus]
