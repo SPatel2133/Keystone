@@ -41,7 +41,63 @@ module ShopifyLedger
         window_start TEXT NOT NULL
       )
     SQL
-    TABLES = LEGACY_TABLES.merge("reconciliation_starts" => STARTS_TABLE).freeze
+    OPERATIONS = [
+      "ALTER TABLE inbox ADD COLUMN received_at INTEGER",
+      "ALTER TABLE inbox ADD COLUMN last_attempt_at INTEGER",
+      "ALTER TABLE inbox ADD COLUMN processed_at INTEGER",
+      "ALTER TABLE inbox ADD COLUMN parked_at INTEGER",
+      "ALTER TABLE inbox ADD COLUMN requeues INTEGER NOT NULL DEFAULT 0 CHECK (requeues >= 0)",
+      "ALTER TABLE transactions ADD COLUMN recorded_at INTEGER",
+      "ALTER TABLE transactions ADD COLUMN source TEXT",
+      <<~SQL.chomp,
+        CREATE TABLE reconciliation_runs (
+          id INTEGER PRIMARY KEY,
+          shop TEXT NOT NULL,
+          window_start TEXT NOT NULL,
+          window_end TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('running', 'failed', 'completed')),
+          started_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          finished_at INTEGER,
+          attempts INTEGER NOT NULL DEFAULT 1 CHECK (attempts >= 1),
+          pages INTEGER NOT NULL DEFAULT 0 CHECK (pages >= 0),
+          orders INTEGER NOT NULL DEFAULT 0 CHECK (orders >= 0),
+          cursor TEXT,
+          last_error TEXT
+        )
+      SQL
+      "CREATE UNIQUE INDEX one_open_run_per_shop ON reconciliation_runs (shop) WHERE status <> 'completed'",
+      "CREATE INDEX inbox_by_shop ON inbox (shop, processed, parked_at)",
+      "CREATE INDEX transactions_by_shop_order ON transactions (shop, order_id)"
+    ].freeze
+    # Each step upgrades the catalog left by the previous one. A new database
+    # runs every step, so fresh and upgraded files share one table definition.
+    MIGRATIONS = [
+      [*LEGACY_TABLES.values,
+       "CREATE INDEX inbox_ready ON inbox (processed, next_attempt_at, id)",
+       "CREATE INDEX transactions_by_shop_currency ON transactions (shop, currency)"],
+      [STARTS_TABLE],
+      OPERATIONS
+    ].freeze
+
+    def self.catalogs
+      @catalogs ||= begin
+        db = SQLite3::Database.new(":memory:")
+        [{}] + MIGRATIONS.map do |statements|
+          statements.each { |statement| db.execute(statement) }
+          catalog(db).freeze
+        end
+      ensure
+        db&.close
+      end.freeze
+    end
+
+    def self.catalog(db)
+      db.execute(<<~SQL).to_h
+        SELECT name, sql FROM sqlite_master
+        WHERE type IN ('table', 'view') AND name NOT GLOB 'sqlite_*'
+      SQL
+    end
 
     def initialize(path)
       @path = path
@@ -50,7 +106,7 @@ module ShopifyLedger
     def connect
       db = SQLite3::Database.new(@path)
       db.busy_timeout(250)
-      prepare_schema(db) unless catalog(db) == TABLES
+      prepare_schema(db) unless self.class.catalog(db) == self.class.catalogs.last
       yield db
     ensure
       db&.close
@@ -58,26 +114,14 @@ module ShopifyLedger
 
     private
 
-    def catalog(db)
-      db.execute(<<~SQL).to_h
-        SELECT name, sql FROM sqlite_master
-        WHERE type IN ('table', 'view') AND name NOT GLOB 'sqlite_*'
-      SQL
-    end
-
     def prepare_schema(db)
       # A concurrent process may have initialized or upgraded the file meanwhile.
+      # DDL is transactional in SQLite, so a failed upgrade leaves the prior version.
       self.class.transaction(db) do
-        tables = catalog(db)
-        if tables.empty?
-          TABLES.each_value { |definition| db.execute(definition) }
-          db.execute("CREATE INDEX inbox_ready ON inbox (processed, next_attempt_at, id)")
-          db.execute("CREATE INDEX transactions_by_shop_currency ON transactions (shop, currency)")
-        elsif tables == LEGACY_TABLES
-          db.execute(STARTS_TABLE)
-        elsif tables != TABLES
-          raise ArgumentError, "incompatible Shopify ledger schema"
-        end
+        version = self.class.catalogs.index(self.class.catalog(db))
+        raise ArgumentError, "incompatible Shopify ledger schema" unless version
+
+        MIGRATIONS.drop(version).flatten.each { |statement| db.execute(statement) }
       end
     end
 
