@@ -20,15 +20,23 @@ module ShopifyLedger
 
     Run = Struct.new(:id, :window_start, :window_end, :cursor, :pages, :resumed, keyword_init: true)
 
-    def initialize(config, clock: -> { Time.now })
+    # Where runs, checkpoints and payments live: the shop's SQLite file by
+    # default, or Postgres::Store. The SQL here is valid in both.
+    SqliteStore = Struct.new(:path) do
+      def connect(&block) = Storage.new(path).connect(&block)
+      def transaction(db, &block) = Storage.transaction(db, &block)
+    end
+
+    def initialize(config, clock: -> { Time.now }, store: nil)
       @config = config
       @clock = clock
+      @store = store
     end
 
     # Returns the shop's checkpoint after finishing any interrupted window and
     # then one fresh window ending now.
     def run(shop)
-      @storage = Storage.new(@config.database_for(shop))
+      @storage = @store || SqliteStore.new(@config.database_for(shop))
       admin = Admin.new(@config, shop)
       loop do
         run = open_run(shop)
@@ -45,7 +53,7 @@ module ShopifyLedger
       upper = @clock.call.getutc
       now = Time.now.to_i
       @storage.connect do |db|
-        Storage.transaction(db) do
+        @storage.transaction(db) do
           resumable = db.get_first_row(<<~SQL, [now, shop])
             UPDATE reconciliation_runs
             SET status = 'running', attempts = attempts + 1, updated_at = ?, last_error = NULL
@@ -113,7 +121,7 @@ module ShopifyLedger
         order_ids.each do |order_id|
           entries = Payments.entries(admin.order_transactions(order_id))
           @storage.connect do |db|
-            Storage.transaction(db) { Payments.apply(db, shop, order_id, entries, source: source) }
+            @storage.transaction(db) { Payments.apply(db, shop, order_id, entries, source: source) }
           end
         end
 
@@ -129,7 +137,7 @@ module ShopifyLedger
     # reconciler of the same window cannot move the saved cursor backwards.
     def save_progress(run, pages, orders, cursor)
       @storage.connect do |db|
-        Storage.transaction(db) do
+        @storage.transaction(db) do
           db.execute(<<~SQL, [pages, orders, cursor, Time.now.to_i, run.id, pages])
             UPDATE reconciliation_runs SET pages = ?, orders = orders + ?, cursor = ?, updated_at = ?
             WHERE id = ? AND pages < ? AND status <> 'completed'
@@ -144,7 +152,7 @@ module ShopifyLedger
       # pages is idempotent by transaction identity.
       restart = @first_request_of_resume
       @storage.connect do |db|
-        Storage.transaction(db) do
+        @storage.transaction(db) do
           db.execute(<<~SQL, [error.message, Time.now.to_i, restart ? 1 : 0, restart ? 1 : 0, run.id])
             UPDATE reconciliation_runs
             SET status = 'failed', last_error = ?, updated_at = ?,
@@ -166,7 +174,7 @@ module ShopifyLedger
     def complete(shop, run)
       upper = run.window_end
       @storage.connect do |db|
-        Storage.transaction(db) do
+        @storage.transaction(db) do
           db.execute(<<~SQL, [Time.now.to_i, Time.now.to_i, run.id])
             UPDATE reconciliation_runs SET status = 'completed', cursor = NULL, finished_at = ?, updated_at = ?
             WHERE id = ?

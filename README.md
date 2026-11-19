@@ -217,8 +217,9 @@ on the order.
 
 ### PostgreSQL backend (workers on several machines)
 
-`bin/shopify-pg-worker --once | --drain | summary SHOP` runs the same payment
-rules (`Payments.apply`, `observe`, `review`) against PostgreSQL. It needs
+`bin/shopify-pg-worker --once | --drain | reconcile SHOP | summary SHOP` runs
+the same payment rules (`Payments.apply`, `observe`, `review`) and the same
+resumable reconciliation (through `Postgres::Store`) against PostgreSQL. It needs
 `SHOPIFY_LEDGER_POSTGRES_URL` and the optional gem group
 (`bundle config set --local with postgres && bundle install`).
 
@@ -240,7 +241,8 @@ same PostgreSQL inbox, still after HMAC verification and before the `200`.
 Requests share one connection behind a mutex. A redelivery with a different
 topic or order gets `409`, and a database error returns `503` with
 `Retry-After`. The variable is separate from the URL, so a configured URL alone
-never moves ingest. Reconciliation and the operator commands still use SQLite.
+never moves ingest. The operator commands (status, audit, deliveries, backup,
+maintenance, moves) still use SQLite.
 
 ### Routing shops to databases and moving a shop
 
@@ -290,11 +292,11 @@ The operations include:
 `--processes` adds real `--drain` processes running concurrently, and workers
 SIGKILLed mid-fetch.
 
-`--postgres` runs the same operation lists against the PostgreSQL worker. It
-needs `SHOPIFY_LEDGER_POSTGRES_URL`. Reconciliation, backups, maintenance and
-shop moves are SQLite-only, so on PostgreSQL they are no-ops. The settle phase
-there sends one final webhook per order instead of reconciling. A dead worker's
-claim is a lease held by another machine, and "time passes" expires leases.
+`--postgres` runs the same operation lists against the PostgreSQL worker and
+reconciliation. It needs `SHOPIFY_LEDGER_POSTGRES_URL`. Backups, maintenance
+and shop moves are SQLite-only, so on PostgreSQL they are no-ops. A dead
+worker's claim is a lease held by another machine, and "time passes" expires
+leases.
 With `--processes` it also starts 2–4 `bin/shopify-pg-worker --drain`
 processes with different machine IDs, and SIGKILLs a worker mid-fetch.
 

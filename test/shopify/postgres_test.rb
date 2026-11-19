@@ -14,7 +14,7 @@ class ShopifyPostgresTest < Minitest::Test
     skip "set SHOPIFY_LEDGER_POSTGRES_URL to run the PostgreSQL tests" unless URL
     require_relative "../../lib/shopify_ledger/postgres"
     @db = ShopifyLedger::Postgres::Database.new(URL)
-    @db.execute("DROP TABLE IF EXISTS inbox, transactions, payment_events")
+    @db.execute("DROP TABLE IF EXISTS #{ShopifyLedger::Postgres::TABLES.join(', ')}")
     @db.migrate
   end
 
@@ -153,6 +153,29 @@ class ShopifyPostgresTest < Minitest::Test
       assert_equal "100.00", net(run)
     ensure
       ENV.delete("SHOPIFY_LEDGER_INBOX")
+    end
+  end
+
+  def test_reconciliation_repairs_missed_webhooks_and_resumes_on_postgres
+    ShopifyFixture.run do |run|
+      arrange_order(run, 1, "10.00")
+      arrange_order(run, 2, "20.00")
+      run.admin.page([order_gid(1)], next_cursor: "p1")
+      run.admin.arrange(ALPHA, "ReconcileOrders", "p1", { errors: [{ message: "down" }] }, code: 500)
+      _stdout, _stderr, status = worker(run, "reconcile", ALPHA)
+      assert_equal 1, status.exitstatus
+      assert_equal [["failed", 1, "p1"]], @db.execute("SELECT status, pages, cursor FROM reconciliation_runs")
+      assert_equal "10.00", net(run)
+
+      run.admin.page([order_gid(2)], after: "p1")
+      stdout, stderr, status = worker(run, "reconcile", ALPHA)
+      assert status.success?, stderr
+      refute_nil JSON.parse(stdout).fetch("synced_through")
+      assert_equal [["completed", 2]], @db.execute("SELECT status, pages FROM reconciliation_runs ORDER BY id LIMIT 1")
+      assert_equal "30.00", net(run)
+      # The retry resumed at the saved cursor; then a fresh window scanned from the start.
+      pages = run.admin.requests.select { |request| request["operation"] == "ReconcileOrders" }.map { |request| request["variables"]["after"] }
+      assert_equal [nil, "p1", "p1", nil, "p1"], pages
     end
   end
 end

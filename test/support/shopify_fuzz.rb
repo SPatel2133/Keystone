@@ -533,9 +533,8 @@ module ShopifyFuzz
     end
   end
 
-  # The same operation lists against the PostgreSQL worker. Reconciliation,
-  # backups, maintenance and moves are SQLite-only, so they do nothing here;
-  # settle instead sends one final webhook per order, as Shopify would.
+  # The same operation lists against the PostgreSQL backend. Backups,
+  # maintenance and moves are SQLite-only, so they do nothing here.
   class PostgresExecution < Execution
     URL = ENV["SHOPIFY_LEDGER_POSTGRES_URL"]
 
@@ -546,7 +545,7 @@ module ShopifyFuzz
       require_relative "../../lib/shopify_ledger/postgres"
       @pg&.close
       @pg = ShopifyLedger::Postgres::Database.new(URL || raise(ArgumentError, "set SHOPIFY_LEDGER_POSTGRES_URL"))
-      @pg.execute("DROP TABLE IF EXISTS inbox, transactions, payment_events")
+      @pg.execute("DROP TABLE IF EXISTS #{ShopifyLedger::Postgres::TABLES.join(', ')}")
       @pg.migrate
     end
 
@@ -588,7 +587,16 @@ module ShopifyFuzz
 
     def worker_executable = "bin/shopify-pg-worker"
 
-    %w[reconcile reconcile_failing_page backup maintain move_shop].each do |op|
+    def reconcile(shop)
+      @clock += 600
+      store = ShopifyLedger::Postgres::Store.new(@pg)
+      ShopifyLedger::Reconciliation.new(@config, clock: -> { @clock }, store: store).run(shop)
+      true
+    rescue ShopifyLedger::Admin::Error, ShopifyLedger::Payments::Error
+      false
+    end
+
+    %w[backup maintain move_shop].each do |op|
       define_method("op_#{op}") { |*| nil }
     end
 
@@ -603,19 +611,23 @@ module ShopifyFuzz
       verify_rows(rows, @pg.execute(EVENTS_SQL))
       claimed = @pg.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 1 AND claimed_by IS NOT NULL")
       fail!("#{claimed} processed deliveries still hold a lease") unless claimed.zero?
+      @pg.execute("SELECT shop, synced_through FROM checkpoints").each do |shop, synced|
+        previous = @checkpoints[shop]
+        fail!("checkpoint for #{shop} moved backwards from #{previous} to #{synced}") if previous && synced < previous
+        @checkpoints[shop] = synced
+      end
     end
 
     def settle
       @orders.each_key { |key| arrange_truth(*key) }
-      @orders.each do |(shop, number), order|
-        receive(shop, "settle-#{number}", "orders/updated", gid(number)) unless order[:transactions].empty?
-      end
+      SHOPS.each { |shop| arrange_pages(shop) }
       10.times do
         @pg.execute("UPDATE inbox SET parked_at = NULL, attempts = 0 WHERE parked_at IS NOT NULL")
         op_advance_time
         pg_worker("settle-machine").drain
         break if @pg.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0").zero?
       end
+      SHOPS.each { |shop| fail!("settle reconciliation failed for #{shop}") unless reconcile(shop) }
       check_invariants(@config.database)
       pending = @pg.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0")
       fail!("#{pending} deliveries never completed") unless pending.zero?

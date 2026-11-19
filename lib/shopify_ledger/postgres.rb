@@ -67,8 +67,29 @@ module ShopifyLedger
           PRIMARY KEY (shop, transaction_id)
         )
       SQL
-      "CREATE INDEX IF NOT EXISTS payment_events_by_shop_order ON payment_events (shop, order_id)"
+      "CREATE INDEX IF NOT EXISTS payment_events_by_shop_order ON payment_events (shop, order_id)",
+      "CREATE TABLE IF NOT EXISTS checkpoints (shop TEXT PRIMARY KEY, synced_through TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS reconciliation_starts (shop TEXT PRIMARY KEY, window_start TEXT NOT NULL)",
+      <<~SQL,
+        CREATE TABLE IF NOT EXISTS reconciliation_runs (
+          id BIGSERIAL PRIMARY KEY,
+          shop TEXT NOT NULL,
+          window_start TEXT NOT NULL,
+          window_end TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('running', 'failed', 'completed')),
+          started_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL,
+          finished_at BIGINT,
+          attempts INTEGER NOT NULL DEFAULT 1 CHECK (attempts >= 1),
+          pages INTEGER NOT NULL DEFAULT 0 CHECK (pages >= 0),
+          orders INTEGER NOT NULL DEFAULT 0 CHECK (orders >= 0),
+          cursor TEXT,
+          last_error TEXT
+        )
+      SQL
+      "CREATE UNIQUE INDEX IF NOT EXISTS one_open_run_per_shop ON reconciliation_runs (shop) WHERE status <> 'completed'"
     ].freeze
+    TABLES = %w[inbox transactions payment_events checkpoints reconciliation_starts reconciliation_runs].freeze
 
     def self.load_driver
       require "pg"
@@ -103,6 +124,16 @@ module ShopifyLedger
 
     # Returns true for a new delivery. A redelivery must name the same topic
     # and order, as with SQLite.
+    # Lets Reconciliation run unchanged against PostgreSQL.
+    class Store
+      def initialize(db)
+        @db = db
+      end
+
+      def connect = yield(@db)
+      def transaction(db, &block) = db.transaction { block.call }
+    end
+
     def self.receive(db, shop:, webhook_id:, topic:, order_id:)
       inserted = db.execute(<<~SQL, [shop, webhook_id, topic, order_id, Time.now.to_i]).any?
         INSERT INTO inbox (shop, webhook_id, topic, order_id, received_at) VALUES (?, ?, ?, ?, ?)
@@ -220,11 +251,17 @@ module ShopifyLedger
       in ["--drain"] if hooks.empty?
         puts JSON.generate(worker.drain)
         0
+      in ["reconcile", String => shop]
+        require_relative "reconciliation"
+        checkpoint = Reconciliation.new(worker_config = Config.load, store: Store.new(db)).run(shop)
+        worker_config.api(shop)
+        puts JSON.generate(shop: shop, synced_through: checkpoint)
+        0
       in ["summary", String => shop]
         puts JSON.generate(shop: shop, totals: Payments.summary(db, shop))
         0
       else
-        raise ArgumentError, "usage: bin/shopify-pg-worker --once | --drain | summary SHOP"
+        raise ArgumentError, "usage: bin/shopify-pg-worker --once | --drain | reconcile SHOP | summary SHOP"
       end
     ensure
       db&.close
