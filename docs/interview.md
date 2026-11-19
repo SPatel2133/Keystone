@@ -72,3 +72,9 @@ Each bug got a focused regression test before the fix. *Lesson:* the example tes
 **A deadlock the fuzzer found.** After the fuzzer started running two PostgreSQL workers at once, one seed hung. Each completion locked its own inbox row and then coalesced the other rows of the same order, so two workers could each hold one row and wait for the other's. The fix is classic lock ordering: lock every same-order row up to the fence in ID order (`ORDER BY id FOR UPDATE`) before applying, so the second completion waits and then sees its row already processed. A four-thread regression test hit `PG::TRDeadlockDetected` in 3 of 3 runs before the fix.
 
 **Porting means porting the guards too.** The SQLite worker only records a failure when `attempts` still matches what it claimed, so a failure that started before an operator retry cannot park the retried delivery. The first PostgreSQL worker dropped that predicate. A review that compared the two workers' `UPDATE` statements line by line found it, and the SQLite race test, rewritten for PostgreSQL, failed with `parked` until the guard came back. Since then, every PostgreSQL write path has been checked against its SQLite twin.
+
+## Notes from the real-store run
+
+- Shopify signs webhooks registered through the Admin API with the app's client secret, so that secret, not the Admin access token, is the HMAC key in the ledger config.
+- Against a live development store, `bin/reconcile` matched Shopify's totals to the cent, and a second run changed nothing.
+- Shopify's manual test gateway accepts only one capture per authorization, so multiple partial captures are tested against the fake Admin API and in the fuzzer instead.
