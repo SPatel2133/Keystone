@@ -37,7 +37,8 @@ module ShopifyLedger
         "shopify_ledger_oldest_pending_delivery_age_seconds" => ["gauge", "Age of the oldest pending delivery", []],
         "shopify_ledger_reconciliation_checkpoint_age_seconds" => ["gauge", "Age of the reconciliation checkpoint", []],
         "shopify_ledger_reconciliation_open_run" => ["gauge", "1 when a reconciliation run is unfinished", []],
-        "shopify_ledger_transactions" => ["gauge", "Stored payment transactions by recording source", []]
+        "shopify_ledger_transactions" => ["gauge", "Stored payment transactions by recording source", []],
+        "shopify_ledger_payment_review" => ["gauge", "Payments an operator should look at, by reason", []]
       }
       report.each do |shop|
         label = %(shop="#{shop[:shop]}")
@@ -54,6 +55,10 @@ module ShopifyLedger
         metrics["shopify_ledger_reconciliation_open_run"][2] << ["{#{label}}", reconciliation[:open_run] ? 1 : 0]
         { "delivery" => :from_webhooks, "reconciliation" => :repaired_by_reconciliation, "unknown" => :unknown_source }.each do |source, key|
           metrics["shopify_ledger_transactions"][2] << [%({#{label},source="#{source}"}), transactions[key]]
+        end
+        { open_transactions: "open_transaction", orders_refunded_beyond_collected: "refund_exceeds_payments",
+          authorizations_captured_beyond_amount: "capture_exceeds_authorization" }.each do |key, reason|
+          metrics["shopify_ledger_payment_review"][2] << [%({#{label},reason="#{reason}"}), shop[:payments][key]]
         end
       end
       metrics.flat_map do |name, (type, help, samples)|

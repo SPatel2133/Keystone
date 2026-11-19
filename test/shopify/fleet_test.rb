@@ -39,6 +39,8 @@ class ShopifyFleetTest < Minitest::Test
       assert_includes lines, %(shopify_ledger_deliveries{shop="#{ALPHA}",state="parked"} 0)
       assert_includes lines, %(shopify_ledger_transactions{shop="#{ALPHA}",source="delivery"} 1)
       assert_includes lines, %(shopify_ledger_reconciliation_open_run{shop="#{ALPHA}"} 0)
+      assert_includes lines, %(shopify_ledger_payment_review{shop="#{ALPHA}",reason="open_transaction"} 0)
+      assert_includes lines, %(shopify_ledger_payment_review{shop="#{ALPHA}",reason="refund_exceeds_payments"} 0)
       assert lines.grep(/\A[a-z_]+\{/).all? { |line| line.match?(/\A[a-z_]+\{[^}]*\} \d+\z/) }, stdout
       refute_match(/100\.00|net|collected/, stdout)
       refute_includes stdout, BETA
