@@ -1,0 +1,42 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require_relative "../test/support/scenarios"
+
+abort "Usage: bin/inventory-demo" unless ARGV.empty?
+STDOUT.sync = true
+opening_stock = 20
+
+Dir.mktmpdir("warehouse-inventory-") do |scratch|
+  puts "Opening stock is #{opening_stock} units. The ledger records adjustments starting at zero."
+
+  [[1, 10], [3, -2]].each do |seq, delta|
+    receipt = LedgerProcess.response(scratch, LedgerProcess.deliver(seq, delta))
+    expected = { "status" => "accepted", "seq" => seq, "cursor" => 1, "balance" => 10 }
+    Scenarios.verify!(expected, receipt, "scan #{seq}")
+    puts format("Scan %d (%+d) accepted. Cursor %d, adjustment %+d, %d units on hand.",
+                seq, delta, receipt.fetch("cursor"), receipt.fetch("balance"), opening_stock + receipt.fetch("balance"))
+  end
+
+  pending = LedgerProcess.snapshot(scratch)
+  Scenarios.verify!({ "events" => [[1, 10], [3, -2]], "checkpoint" => [1, "10"] }, pending, "buffered inventory")
+  puts "Waiting for scan 2. Scan 3 is already stored."
+
+  request = LedgerProcess.deliver(2, -3, hook: "after_commit_before_ack")
+  stdout, stderr, status = LedgerProcess.run(scratch, request, entry: LedgerProcess::HOOK_ENTRY)
+  child = CrashHarness.observation(stdout, stderr, status)
+  Scenarios.verify!(CrashHarness.killed, child, "lost acknowledgment")
+  puts "Scan 2 (-3) committed. SIGKILL (#{child.fetch("signal")}) before acknowledgment, #{stdout.bytesize} stdout bytes."
+
+  durable = LedgerProcess.snapshot(scratch)
+  expected = { "events" => [[1, 10], [2, -3], [3, -2]], "checkpoint" => [3, "5"] }
+  Scenarios.verify!(expected, durable, "durable inventory before retry")
+  puts "SQLite before retry: rows=#{JSON.generate(durable.fetch("events"))} checkpoint=#{JSON.generate(durable.fetch("checkpoint"))}"
+
+  replay = LedgerProcess.response(scratch, LedgerProcess.deliver(2, -3))
+  Scenarios.verify!({ "status" => "duplicate", "seq" => 2, "cursor" => 3, "balance" => 5 }, replay, "retry scan 2")
+  Scenarios.verify!(durable, LedgerProcess.snapshot(scratch), "durable inventory after retry")
+  stock = opening_stock + replay.fetch("balance")
+  Scenarios.verify!(25, stock, "inventory on hand")
+  puts "Retry scan 2: #{JSON.generate(replay)}"
+  puts "#{opening_stock} opening units + #{replay.fetch("balance")} adjustment units = #{stock} units on hand."
+end

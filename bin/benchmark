@@ -1,0 +1,6 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require_relative "../benchmark/ledger_benchmark"
+
+abort "Usage: bin/benchmark" unless ARGV.empty?
+puts JSON.pretty_generate(LedgerBenchmark.new.run)

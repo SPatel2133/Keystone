@@ -1,53 +1,20 @@
-# Crash-safe event consumer
+# Crash-safe event processing in Ruby and SQLite
 
-This Ruby CLI consumes one local event stream. It reads one JSON request through EOF and uses `ledger.sqlite3` in the caller’s working directory. Run it from a scratch directory when exploring the contract.
+This project implements two event consumers. The Shopify ledger tracks sales and refunds by shop and currency, handles webhook retries, and reconciles missed deliveries. The sequence ledger applies inventory adjustments in order, including when a scan arrives late or a process dies after committing.
 
-## Setup and demo
+## Quick start
 
-Tested on macOS arm64 with Ruby 2.6.10, Bundler 1.17.2, sqlite3 gem 1.3.13, SQLite 3.51.0, and Minitest 5.11.3. The sqlite3 gem needs a compiler and SQLite development headers when installed from source.
-
-Run these commands from the project directory.
+From the repository root, install the locked dependencies and run both synthetic demos. The Shopify demo uses local fixtures and requires no merchant credentials.
 
 ```sh
 bundle check || bundle install --path vendor/bundle
-bin/check
-bin/demo
-bin/demo --evidence > evidence.jsonl
+bin/shopify-demo
+bin/inventory-demo
 ```
 
-The demo creates and removes its own scratch databases. It shows the sequence order 1, 3, 2, two real process kills, the SQLite rows before each retry, and a rejected conflict. The checked-in [evidence](evidence.jsonl) records expected and observed results, versions, and a digest of the source, test, and dependency files. See [verification](VERIFICATION.md) for the release commands and results.
+In the Shopify demo, a 100.00 sale and a 25.00 refund leave 75.00 after replay. In the warehouse demo, the final count is 25 units after a missing scan arrives and the sender retries. Run `bin/check` and `bin/shopify-check` for the regression suites.
 
-Try the production entry from an unrelated directory.
-
-```sh
-project="$PWD"
-scratch="$(mktemp -d)"
-(
-  cd "$scratch" || exit 1
-  printf '%s\n' '{"op":"deliver","seq":3,"delta":2}' | "$project/bin/ledger"
-  printf '%s\n' '{"op":"state"}' | "$project/bin/ledger"
-)
-```
-
-The first response is `{"status":"accepted","seq":3,"cursor":0,"balance":0}`. The state stays at cursor 0 and balance 0 until the missing earlier sequences arrive.
-
-## How it works
-
-- Ruby validates the request before opening storage. It recognizes an identical retry by sequence and delta and returns the current checkpoint. A different delta for a stored sequence is a conflict, even after that event has been applied.
-- SQLite stores the first accepted delta for each sequence and one checkpoint. Ruby finds the consecutive keys above the cursor and sums their deltas. A zero delta still advances the cursor. Insertion and checkpoint update commit together under `BEGIN IMMEDIATE`.
-- Ruby emits the receipt after SQLite commits. If the process dies between the commit and the receipt, retrying the same event returns `duplicate`. A death before commit allows the retry to return `accepted`. Splitting the insert and checkpoint updates into two commits can strand an event row with a stale checkpoint after a crash.
-- A SQLite lock timeout returns `{"error":"busy","retryable":true}` after rolling back any active transaction. The lock wait is configured for 250 ms. Unexpected failures exit nonzero with a diagnostic on stderr.
-- Sequences are positive signed 64-bit integers, and each delta is signed 64-bit. Ruby sums with arbitrary precision. SQLite stores the balance as canonical decimal text. The JSON response contains exact integer tokens. JavaScript clients using `Number` can lose precision for values outside the safe-integer range. Use a lossless JSON parser for such values.
-
-An indefinitely missing sequence stalls the checkpoint and lets pending rows accumulate. Applied rows are retained too, so the database grows with the number of unique sequences. That history lets the ledger distinguish identical retries from conflicting deltas after application.
-
-The recovery tests verify process death on one host with one local SQLite database and no external side effects. Power loss and exactly-once delivery across services are outside the tested scope.
-
-## Walkthrough questions
-
-1. What stored fact proves event 3 was received but remains unapplied?
-2. Why do the two retries yield different receipts with the same final balance?
-3. What changes if the missing sequence never arrives?
+[Shopify ledger](#shopify-order-and-refund-ledger) · [Inventory walkthrough](#warehouse-inventory-walkthrough) · [Benchmark](#benchmark) · [Verification notes](VERIFICATION.md)
 
 ## Shopify order and refund ledger
 
@@ -131,3 +98,87 @@ worker repeatedly to drain the inbox.
 [Shopify webhook verification](https://shopify.dev/docs/apps/build/webhooks/verify-deliveries) ·
 [Order transaction schema](https://shopify.dev/docs/api/admin-graphql/2026-10/objects/OrderTransaction) ·
 [Order reconciliation query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/orders)
+
+## Warehouse inventory walkthrough
+
+From the project root, install the locked dependencies if needed. Run the inventory demo to exercise crash recovery.
+
+```sh
+bundle check || bundle install --path vendor/bundle
+project="$PWD"
+"$project/bin/inventory-demo"
+```
+
+The warehouse opens with 20 units. Its ledger balance tracks *adjustments*. Watch scan 3 wait behind a gap, then watch SQLite after the child dies while acknowledging scan 2. The retry should leave 25 units on hand.
+
+To inspect a stalled stream yourself, run the following from that same shell. The two deliveries create a ledger in a new temporary directory.
+
+```sh
+(
+  cd "$(mktemp -d)" || exit 1
+  printf '%s\n' '{"op":"deliver","seq":1,"delta":10}' | "$project/bin/ledger"
+  printf '%s\n' '{"op":"deliver","seq":3,"delta":-2}' | "$project/bin/ledger"
+  "$project/bin/doctor"
+)
+```
+
+The doctor reads the caller's ledger in one SQLite snapshot. Here the applied balance is +10, and scan 3 is already stored. Receiving scan 2 will allow both adjustments to apply.
+
+Doctor supports the original ledger's rollback journal. It reports a missing ledger without creating a file and refuses externally configured WAL mode before SQLite can create sidecars.
+
+### Benchmark
+
+Run `"$project/bin/benchmark"` from any working directory. Each workload gets its own scratch database. The command checks the durable cursor, adjustment balance, and unique event count before printing JSON.
+
+- **Ordered deliveries** averaged 3,392 acknowledgments/s over 1,000 new events. Median latency was 0.278 ms and p95 was 0.391 ms.
+- **Identical retries** averaged 12,062 acknowledgments/s over 1,000 retries. Median latency was 0.078 ms and p95 was 0.087 ms. Both batches finished with 1,000 unique events, cursor 1,000 and balance 1,000.
+- **Gap closure** took 23.932 ms for one delivery. Sequences 2 through 10,001 were already durable when the timer started. Sequence 1 applied all 10,000 buffered events and itself, leaving cursor, balance, and unique event count at 10,001.
+
+This sample used one writer on an Apple M5 MacBook Air with 16 GB RAM, macOS 26.5.1, Ruby 2.6.10, SQLite 3.51.0, sqlite3 gem 1.3.13 and Bundler 1.17.2. A monotonic clock measures the in-process ledger call, including database open, schema check, commit and close. Ruby startup, JSON parsing, output, fixture setup and verification are outside the timer. End-to-end CLI latency and concurrent throughput were unmeasured. [Full observed results](benchmark/results.json)
+
+## Setup and original demo
+
+Tested on macOS arm64 with Ruby 2.6.10, Bundler 1.17.2, sqlite3 gem 1.3.13, SQLite 3.51.0, and Minitest 5.11.3. The sqlite3 gem needs a compiler and SQLite development headers when installed from source.
+
+Run these commands from the project directory.
+
+```sh
+bundle check || bundle install --path vendor/bundle
+bin/check
+bin/demo
+bin/demo --evidence > evidence.jsonl
+```
+
+The demo creates and removes its own scratch databases. It shows the sequence order 1, 3, 2, two real process kills, the SQLite rows before each retry, and a rejected conflict. The checked-in [evidence](evidence.jsonl) records expected and observed results, versions, and a digest of the source, test, and dependency files. See [verification](VERIFICATION.md) for the release commands and results.
+
+Try the production entry from an unrelated directory.
+
+```sh
+project="$PWD"
+scratch="$(mktemp -d)"
+(
+  cd "$scratch" || exit 1
+  printf '%s\n' '{"op":"deliver","seq":3,"delta":2}' | "$project/bin/ledger"
+  printf '%s\n' '{"op":"state"}' | "$project/bin/ledger"
+)
+```
+
+The first response is `{"status":"accepted","seq":3,"cursor":0,"balance":0}`. The state stays at cursor 0 and balance 0 until the missing earlier sequences arrive.
+
+## How it works
+
+- Ruby validates the request before opening storage. It recognizes an identical retry by sequence and delta and returns the current checkpoint. A different delta for a stored sequence is a conflict, even after that event has been applied.
+- SQLite stores the first accepted delta for each sequence and one checkpoint. Ruby finds the consecutive keys above the cursor and sums their deltas. A zero delta still advances the cursor. Insertion and checkpoint update commit together under `BEGIN IMMEDIATE`.
+- Ruby emits the receipt after SQLite commits. If the process dies between the commit and the receipt, retrying the same event returns `duplicate`. A death before commit allows the retry to return `accepted`. Splitting the insert and checkpoint updates into two commits can strand an event row with a stale checkpoint after a crash.
+- A SQLite lock timeout returns `{"error":"busy","retryable":true}` after rolling back any active transaction. The lock wait is configured for 250 ms. Unexpected failures exit nonzero with a diagnostic on stderr.
+- Sequences are positive signed 64-bit integers, and each delta is signed 64-bit. Ruby sums with arbitrary precision. SQLite stores the balance as canonical decimal text. The JSON response contains exact integer tokens. JavaScript clients using `Number` can lose precision for values outside the safe-integer range. Use a lossless JSON parser for such values.
+
+An indefinitely missing sequence stalls the checkpoint and lets pending rows accumulate. Applied rows are retained too, so the database grows with the number of unique sequences. That history lets the ledger distinguish identical retries from conflicting deltas after application.
+
+The recovery tests verify process death on one host with one local SQLite database and no external side effects. Power loss and exactly-once delivery across services are outside the tested scope.
+
+## Walkthrough questions
+
+1. What stored fact proves event 3 was received but remains unapplied?
+2. Why do the two retries yield different receipts with the same final balance?
+3. What changes if the missing sequence never arrives?

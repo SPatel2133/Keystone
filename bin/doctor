@@ -1,0 +1,10 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require_relative "../lib/event_consumer/doctor"
+
+abort "usage: bin/doctor" unless ARGV.empty?
+begin
+  puts EventConsumer::Doctor.report
+rescue SQLite3::Exception, SystemCallError, ArgumentError => error
+  abort "doctor: #{error.message}"
+end

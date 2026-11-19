@@ -85,3 +85,15 @@ and GitHub Actions were unavailable for this local-only release check.
 4. **Demo and release evidence.** The terminal demo prints the durable sale, refund, and inbox status before each restart. The page-two failure fixture starts with an older checkpoint so premature advancement is observable even when the entire test finishes in one second.
 
 All reproduced issues above have passing regression coverage. Both independent Python checks for the original CLI also passed after integration.
+
+## Inventory, diagnostics and benchmark
+
+Baseline: 15 original tests (221 assertions) and 20 Shopify tests (153 assertions). Final: `bin/check` passed 22 tests (300 assertions) including the seven new tests, and `bin/shopify-check` passed 20 tests (153 assertions). Zero failures, errors, or skips.
+
+Ranked probes, all closed:
+
+1. Incorrect stock or double application. Two runs from a directory with independent stock adjustments returned the same duplicate receipt and 25 units. The killed child emitted zero stdout bytes. A separate SQLite reader observed all three events before replay.
+2. Misleading gap-closure timing. An independent call-count probe attributed 1,000 timed calls to each batch and one to gap closure. The 10,000 buffering calls happened before its timer.
+3. Inconsistent diagnostics or writes. An uncommitted writer was invisible to doctor. A sparse maximum sequence used an integer primary-key range search. A WAL probe exposed a generic open failure, now reported explicitly without creating sidecars. The missing-file check created nothing. After both suites, doctor, inventory demo and full benchmark, the caller's pre-existing stalled database compared byte-for-byte equal to its backup.
+
+To reproduce, run the reviewer walkthrough in README, followed by `"$project/bin/check"`, `"$project/bin/shopify-check"`, and `"$project/bin/benchmark"`. The measured output is in [benchmark/results.json](benchmark/results.json).
