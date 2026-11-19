@@ -219,7 +219,11 @@ module ShopifyFixture
 
     def read(sql, parameters = [])
       rows = nil
-      SQLite3::Database.new(database) { |connection| rows = connection.execute(sql, parameters) }
+      SQLite3::Database.new(database) do |connection|
+        # Tests poll while workers write; wait for the lock like a real reader would.
+        connection.busy_timeout(2000)
+        rows = connection.execute(sql, parameters)
+      end
       rows
     end
 
