@@ -1,4 +1,3 @@
-require_relative "bundle"
 require_relative "ledger"
 
 module EventConsumer

@@ -1,0 +1,4 @@
+#!/usr/bin/env ruby
+require "event_consumer/cli"
+
+exit EventConsumer::CLI.run
