@@ -185,6 +185,14 @@ Each bug got a regression test, which failed before its fix:
 
 Afterwards, `bin/shopify-check` passed 88 runs / 948 assertions, and `--postgres --processes --seed 21 --runs 10 --steps 150` had 0 failures.
 
+## Found by fuzzer (PostgreSQL deadlock)
+
+The PostgreSQL fuzzer now runs two workers at once on separate connections on every third worker step. With that change, `--postgres --seed 31 --runs 20 --steps 200` hung.
+
+`test_concurrent_workers_on_the_same_orders_never_deadlock` uses 4 threads on 20 orders × 3 deliveries. It raised `PG::TRDeadlockDetected` in 3 of 3 runs before the fix. Completion locked only its own inbox row, then updated the other same-order rows. It now locks every same-order row up to the fence in ID order first.
+
+After the fix, the test passed 3 of 3 runs, the seed-31 campaign had 0 failures in 31.3 s, and `bin/shopify-check` passed 89 runs / 950 assertions.
+
 ## Drain throughput: SQLite and PostgreSQL
 
 `ruby benchmark/shopify_drain.rb ORDERS 50 UPDATES [sqlite|postgres]` uses a fake Admin API that adds 50 ms of latency. Local Docker `postgres:16-alpine` was used, and a fuzz campaign was running on the same machine at the time.
