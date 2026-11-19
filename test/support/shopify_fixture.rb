@@ -183,6 +183,11 @@ module ShopifyFixture
                      *args, chdir: @directory)
     end
 
+    def spawn(relative, *args)
+      executable = File.join(ROOT, relative)
+      Open3.popen3(@environment, [executable, executable], *args, chdir: @directory)
+    end
+
     def json(relative, *args, success: true)
       stdout, stderr, status = command(relative, *args)
       unless success == status.success? && status.exited?
