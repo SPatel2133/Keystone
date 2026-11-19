@@ -129,4 +129,10 @@ class ShopifyPostgresTest < Minitest::Test
     assert_empty report["failures"], JSON.pretty_generate(report["failures"])
     assert_operator report["operations"].fetch("crash_before_commit"), :>, 0
   end
+
+  def test_fuzz_seeds_with_real_drains_on_several_machines_and_killed_workers
+    report = ShopifyFuzz.campaign(seed: 7, runs: 3, steps: 60, processes: true, backend: :postgres)
+    assert_empty report["failures"], JSON.pretty_generate(report["failures"])
+    assert_operator report["operations"].fetch("kill_mid_fetch"), :>, 0
+  end
 end

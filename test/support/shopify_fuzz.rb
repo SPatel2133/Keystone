@@ -369,7 +369,12 @@ module ShopifyFuzz
     def op_maintain(*) = ShopifyLedger::Maintenance.run(@config)
 
     def op_drain_processes(a, _b, _c)
-      workers = Array.new(2 + (a % 3)) { @fixture.spawn("bin/shopify-worker", "--drain") }
+      workers = Array.new(2 + (a % 3)) do |machine|
+        ENV["SHOPIFY_LEDGER_WORKER_ID"] = "machine-#{machine}"
+        @fixture.spawn(worker_executable, "--drain")
+      ensure
+        ENV.delete("SHOPIFY_LEDGER_WORKER_ID")
+      end
       workers.each do |stdin, stdout, stderr, waiter|
         stdin.close
         output = stdout.read
@@ -378,10 +383,12 @@ module ShopifyFuzz
       end
     end
 
+    def worker_executable = "bin/shopify-worker"
+
     def op_kill_mid_fetch(*)
       admin = @fixture.admin
       before = admin.requests.size
-      stdin, stdout, stderr, waiter = @fixture.spawn("bin/shopify-worker", "--once")
+      stdin, stdout, stderr, waiter = @fixture.spawn(worker_executable, "--once")
       stdin.close
       deadline = Time.now + 3
       sleep 0.01 until admin.requests.size > before || Time.now > deadline || !waiter.alive?
@@ -579,7 +586,9 @@ module ShopifyFuzz
       @pg.execute("UPDATE inbox SET parked_at = NULL, attempts = 0, next_attempt_at = 0, last_error = NULL WHERE id = ?", [id])
     end
 
-    %w[reconcile reconcile_failing_page backup maintain move_shop drain_processes kill_mid_fetch].each do |op|
+    def worker_executable = "bin/shopify-pg-worker"
+
+    %w[reconcile reconcile_failing_page backup maintain move_shop].each do |op|
       define_method("op_#{op}") { |*| nil }
     end
 

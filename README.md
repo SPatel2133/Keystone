@@ -290,6 +290,8 @@ needs `SHOPIFY_LEDGER_POSTGRES_URL`. Reconciliation, backups, maintenance and
 shop moves are SQLite-only, so on PostgreSQL they are no-ops. The settle phase
 there sends one final webhook per order instead of reconciling. A dead worker's
 claim is a lease held by another machine, and "time passes" expires leases.
+With `--processes` it also starts 2–4 `bin/shopify-pg-worker --drain`
+processes with different machine IDs, and SIGKILLs a worker mid-fetch.
 
 After every step it checks that:
 1. No `(shop, transaction_id)` is stored twice.
