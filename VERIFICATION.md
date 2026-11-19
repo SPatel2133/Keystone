@@ -88,6 +88,10 @@ Every delivery was stored exactly once and processed, giving 400 transactions an
 
 Five `bin/shopify-backup` copies were taken in sequence while 4 `--drain` workers processed 300 deliveries against a fake Admin API that answers in 10 ms. The copies captured 0, 11, 43, 73 and 105 processed deliveries. Each copy had exactly as many transactions as processed deliveries, and each passed `PRAGMA integrity_check`. `test/shopify/backup_test.rb` repeats this with 3 workers. It also checks that the command refuses to overwrite an existing file, rejects bad usage, and leaves no partial file.
 
+## Long-running worker
+
+`bin/shopify-worker --watch` processed a delivery that arrived after it started. On SIGTERM it exited 0 with `{"processed":1,"retry":0,"parked":0,"status":"stopped"}`. The test is `test_watch_processes_new_deliveries_and_stops_cleanly_on_sigterm`. Final local counts at this point: `bin/check` 29 / 483 and `bin/shopify-check` 50 / 620, with no failures, errors or skips.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
