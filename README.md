@@ -249,7 +249,9 @@ A config can name extra SQLite files and route shops to them:
 
 Webhooks, reconciliation, summary, status, audit and the delivery tools follow
 the route. Shops without a route use `database`. A worker drains one file:
-`SHOPIFY_LEDGER_DATABASE=eu bin/shopify-worker --drain`.
+`SHOPIFY_LEDGER_DATABASE=eu bin/shopify-worker --drain`. `bin/shopify-backup` and
+`bin/shopify-maintain` honour the same variable and report totals only for the
+shops routed to that file.
 
 `bin/shopify-move-shop SHOP --to NAME` moves a shop in three steps:
 1. It copies every inbox, ledger, payment-event and reconciliation row for the shop in one transaction. The copy is compared row for row with the source before commit.

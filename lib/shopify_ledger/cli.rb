@@ -17,7 +17,8 @@ module ShopifyLedger
 
         require_relative "maintenance"
         begin
-          puts JSON.generate(Maintenance.run(Config.load))
+          config = Config.load
+          puts JSON.generate(Maintenance.run(config, database: config.database_named(ENV["SHOPIFY_LEDGER_DATABASE"])))
         rescue SQLite3::BusyException, SQLite3::LockedException
           warn "shopify ledger: database is busy; retry maintenance during a quiet period"
           return 1
@@ -114,7 +115,9 @@ module ShopifyLedger
       require_relative "backup"
       raise ArgumentError, "usage: bin/shopify-backup DESTINATION" unless arguments.size == 1
 
-      puts JSON.generate(Backup.new(Config.load).create(arguments.first))
+      config = Config.load
+      backup = Backup.new(config, database: config.database_named(ENV["SHOPIFY_LEDGER_DATABASE"]))
+      puts JSON.generate(backup.create(arguments.first))
       0
     rescue Backup::Refused => error
       warn "shopify ledger: backup refused: #{error.message}"

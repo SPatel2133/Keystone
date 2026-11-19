@@ -63,6 +63,14 @@ class ShopifyShopRoutingTest < Minitest::Test
       with_database("eu") { assert_equal({ "status" => "processed" }, run.worker) }
       assert_equal "100.00", run.summary(ALPHA).fetch("totals").first.fetch("net")
       assert_equal "7.00", run.summary(BETA).fetch("totals").first.fetch("net")
+      with_database("eu") do
+        backup = run.json("bin/shopify-backup", File.join(File.dirname(run.database), "eu-backup.sqlite3"))
+        assert_equal [BETA], backup.fetch("totals").keys
+        assert_equal 1, backup.fetch("transactions")
+        assert_equal({ BETA => [{ "currency" => "USD", "collected" => "7.00", "refunded" => "0.00", "net" => "7.00" }] },
+                     run.json("bin/shopify-maintain").fetch("totals"))
+      end
+      assert_equal [ALPHA], run.json("bin/shopify-maintain").fetch("totals").keys
       status = run.json("bin/shopify-status", success: false).fetch("shops").to_h { |shop| [shop["shop"], shop["transactions"]["total"]] }
       assert_equal({ ALPHA => 1, BETA => 1 }, status)
     end
