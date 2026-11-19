@@ -230,6 +230,8 @@ Doctor supports the original ledger's rollback journal. It reports a missing led
 
 `ruby benchmark/shopify_drain.rb` drains 200 deliveries against a fake Admin API that answers in 50 ms. One worker processed 17.9 deliveries/s and eight processed 122.8/s, with exactly one fetch per delivery ([results](VERIFICATION.md#concurrent-workers)).
 
+`ruby benchmark/shopify_ingest.rb` measures webhook acknowledgments under concurrent senders and drain workers ([results](VERIFICATION.md#webhook-ingest-under-contention)).
+
 `ruby benchmark/shopify_operations.rb` times Shopify worker selection and `bin/shopify-status` against 50,000 parked and 50,000 processed deliveries ([results](VERIFICATION.md#measured-boundary-parked-history)).
 
 Run `bin/benchmark --full` for the 100,000-event workload, or `bin/benchmark --smoke` to check the same paths quickly. This single-writer sample used an Apple M5 with 16 GiB, Ruby 3.4.13 and SQLite 3.54.1.

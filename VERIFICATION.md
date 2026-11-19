@@ -59,6 +59,31 @@ Without the partial index, worker selection cost grew with parked history. That 
 - `--limit` and the exit codes behave as documented.
 - The existing worker kill tests at both seams still recover immediately, because a dead claimant's claim is taken over.
 
+## Webhook ingest under contention
+
+`ruby benchmark/shopify_ingest.rb 400 8 W` sends 400 signed webhooks from 8 threads. A sender retries any non-200 response, as Shopify does. Meanwhile W `--drain` loops run against the same file.
+
+| Drain workers | 200 | 503 `storage_busy` | Ack/s | p50 ms | p95 ms | Max ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 400 | 7 | 152.4 | 15.2 | 23.0 | 1,787 |
+| 4 | 400 | 6 | 109.1 | 28.4 | 118.2 | 1,535 |
+
+Every delivery was stored exactly once and processed, giving 400 transactions and net CAD 400.00. About 1.5–1.75% of attempts hit the webhook's 250 ms lock wait and got a retryable 503. That happened even with no workers running, so the senders were contending with each other under FULL synchronous commits. The slowest acknowledgment stayed well under Shopify's 5 s delivery timeout. A higher webhook ingest rate would need WAL mode or a server database. WAL was not adopted here because the documented durability and benchmark settings assume rollback-journal mode.
+
+## Edge cases, fleet commands and setup
+
+`test/shopify/operations_edge_test.rb` covers four edge cases:
+- **Large and fractional amounts:** a 20-digit CAD sale, and BHD amounts with three and six decimal places, gave identical exact totals in summary, status and both audit modes.
+- **Cross-shop isolation:** the delivery ID `shared` was reused by two shops. Listing, retry refusal, status, audit and parking each stayed within their shop.
+- **Repeated page cursor:** a page whose next cursor repeats the current one fails the run, and the run is not saved past the last good page. It resumes once the API is fixed.
+- **Corrupt currency:** a row with an invalid currency no longer makes `bin/shopify-audit` exit 1. The audit lists the row and reports `totals_error` (found defect).
+
+`test/shopify/fleet_test.rb` checks two commands:
+- `bin/reconcile --all` exits 1 when one shop's API returns HTTP 500. It still completes the healthy shop.
+- `bin/shopify-status --prometheus` emits integer samples only, includes no money, and filters by shop.
+
+`bin/setup` passed from a checkout path with a space and with `RUBYOPT=-w BUNDLE_GEMFILE=/nonexistent` in the caller's environment. Without Ruby on `PATH`, it exited 1 with an install hint.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
