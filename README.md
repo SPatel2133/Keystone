@@ -39,7 +39,7 @@ flowchart LR
 
 Run `bin/shopify-demo` for the merchant example: a CAD 100.00 sale and CAD 25.00 refund produce CAD 75.00 net after crash recovery or reconciliation. Both demos use disposable databases.
 
-[Machine trace](evidence.jsonl) · [90-second whiteboard walkthrough](docs/interview.md) · [Benchmark](#benchmark) · [Verification](VERIFICATION.md)
+[Machine trace](evidence.jsonl) · [90-second whiteboard walkthrough](docs/interview.md) · [Architecture and invariants](docs/architecture.md) · [Benchmark](#benchmark) · [Verification](VERIFICATION.md)
 
 ## Shopify order and refund ledger
 
