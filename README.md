@@ -101,11 +101,53 @@ bin/shopify-summary example.myshopify.com
 bin/reconcile example.myshopify.com
 ```
 
-`--once` processes one eligible delivery. It reports `processed`, `idle`, or
-`retry`. A retry exits nonzero and defers the delivery for 2, 4, 8, 16, 32,
-then at most 60 seconds per attempt. The worker selects the oldest eligible
-delivery and can process other orders while a failure backs off. Invoke the
-worker repeatedly to drain the inbox.
+`--once` processes one eligible delivery. It reports `processed`, `idle`,
+`retry` or `parked`. A retry exits nonzero and defers the delivery for 2, 4, 8,
+16, 32, then at most 60 seconds per attempt. The worker selects the oldest
+eligible delivery and can process other orders while a failure backs off.
+Invoke the worker repeatedly to drain the inbox.
+
+Each Admin API request is retried inside one attempt on HTTP 429, 500, 502,
+503 and 504, on GraphQL `THROTTLED`, and on connection errors. Waits are 0.25 s
+then doubling, and `Retry-After` is honoured up to 2 s. Set `api_attempts`
+(1 to 10, default 3) in the configuration to change this. Every query is
+read-only, so retrying one never changes Shopify state. Malformed or
+incomplete responses are not retried; they count as a failed attempt.
+
+### Operating the ledger
+
+```sh
+bin/shopify-status                                   # every configured shop
+bin/shopify-status example.myshopify.com
+bin/shopify-deliveries list example.myshopify.com --state parked
+bin/shopify-deliveries retry example.myshopify.com WEBHOOK_ID
+bin/shopify-audit example.myshopify.com --order gid://shopify/Order/101
+```
+
+- `bin/shopify-status` reads one consistent SQLite snapshot per call. For each
+  shop it reports pending, failing, parked and processed deliveries, the age
+  of the oldest pending delivery, the open and last completed reconciliation
+  run, the checkpoint age, which transactions came from webhooks versus
+  reconciliation repair, and the totals. It exits 0 when every shop is healthy
+  and 2 when a shop needs attention, so a cron job or probe can alert on it.
+  `reasons` explains each problem: parked deliveries, a pending delivery
+  waiting over 15 minutes, a failed reconciliation run, a checkpoint over two
+  hours old, reconciliation that has never completed, or unreadable totals.
+- After `max_attempts` failed attempts (1 to 1000, default 12) a delivery is
+  **parked**. The worker never selects it again, so a poison order cannot use
+  up worker time, and other orders keep flowing. `bin/shopify-deliveries list`
+  shows deliveries by state with attempt counts, the last error and
+  timestamps. `retry` gives one parked or failing delivery a fresh attempt
+  budget and records the requeue. It refuses a processed delivery because its
+  effects are final, and it refuses an unknown delivery ID.
+- `bin/shopify-audit` explains a total. Each stored transaction lists the
+  delivery (`recorded_by: delivery`, `reference: WEBHOOK_ID`) or reconciliation
+  run (`reconciliation`, run ID) that first recorded it, plus the time it was
+  recorded. `--order` adds that order's totals and every webhook delivery that
+  referenced it. Rows written before provenance tracking report `unknown`.
+- The worker, reconciliation and Admin retries write one JSON object per line
+  on stderr, for example `{"event":"delivery_parked","shop":...,"delivery":...,"attempt":12,"error":...}`.
+  Logs carry identifiers and outcomes only, never tokens or webhook bodies.
 
 ### Storage and recovery
 
@@ -113,7 +155,8 @@ worker repeatedly to drain the inbox.
 - The worker fetches a complete order transaction set through Admin GraphQL `2026-10` outside the SQLite write transaction. It requires an exact transaction count and distinct IDs. It counts successful sales and captures as collected, and successful refunds as positive refunds. Net is collected minus refunded. Totals are exact decimal strings separated by shop and shop currency. They describe observed order payment transactions.
 - Worker writes and the inbox processed flag commit together. A delivery ID deduplicates HTTP retries, and a transaction ID deduplicates payment effects across different deliveries. Shopify webhook delivery order is irrelevant because each accepted delivery points to the current order transactions.
 - Reconciliation reads a fixed window of changed orders using `UPDATED_AT`. It saves the start of the first seven-day window before fetching page one. A retry keeps that starting point even if the first scan failed days ago. After a successful run, later scans start five minutes before the completed checkpoint. Failed scans can leave imported orders durable while preserving the checkpoint for replay. Recovery covers the chosen window and the shop's authorized order history.
-- Older Shopify ledger databases upgrade automatically in a SQLite transaction. Commands verify the application tables before reporting merchant totals. An incompatible database produces an error.
+- Each window is a durable `reconciliation_runs` row. After every fully applied page, the run stores the next page cursor. A failed or killed run resumes at the first page it had not applied, then a fresh window runs up to now. Resuming is safe because the window's upper bound is fixed. An order updated after the failure leaves this window and falls inside the next one, which starts five minutes before this window's end. If a saved cursor fails on its first reuse (for example, because it expired), the next attempt rescans the window from page one. Repeated pages are idempotent because payments are identified by transaction ID. Only one unfinished run per shop can exist.
+- The schema is versioned. Each command compares the database's table definitions with every known version and applies only the later migrations, all in one SQLite transaction. SQLite DDL is transactional, so a failed upgrade leaves the previous version intact and a later command can retry it. Commands verify the application tables before reporting merchant totals. An unrecognized database produces an error and is not modified.
 - The demo proves recovery from process death on one host. Verification uses synthetic Shopify responses and a single SQLite database. A live Shopify installation, power loss, and multi-host operation are outside the verified scope.
 
 [Shopify webhook verification](https://shopify.dev/docs/apps/build/webhooks/verify-deliveries) ·
