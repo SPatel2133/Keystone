@@ -103,6 +103,5 @@ module ShopifyLedger
       # sqlite3 1.3 binds ASCII-8BIT strings as BLOBs.
       "#{whole}.#{fraction.to_s.ljust(2, "0")}".encode(Encoding::UTF_8)
     end
-    private_class_method :format_decimal
   end
 end

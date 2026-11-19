@@ -17,6 +17,7 @@ module ShopifyLedger
 
       return deliveries(arguments) if command == :deliveries
       return status(arguments) if command == :status
+      return audit(arguments) if command == :audit
 
       script = command == :summary ? "shopify-summary" : "reconcile"
       raise ArgumentError, "usage: bin/#{script} SHOP" unless arguments.size == 1
@@ -49,6 +50,29 @@ module ShopifyLedger
       report = Status.new(config).report(shops)
       puts JSON.generate(generated_at: Time.now.utc.iso8601, shops: report)
       report.all? { |shop| shop[:health] == "ok" } ? 0 : 2
+    end
+
+    AUDIT_USAGE = "usage: bin/shopify-audit SHOP [--order ORDER_GID | --limit N]"
+
+    def self.audit(arguments)
+      require_relative "audit"
+      shop, option, value, *extra = arguments
+      raise ArgumentError, AUDIT_USAGE unless shop && extra.empty? && (option.nil? || value)
+
+      config = Config.load
+      config.api(shop)
+      options = case option
+                when nil then {}
+                when "--order" then { order_id: value }
+                when "--limit"
+                  limit = Integer(value, exception: false)
+                  raise ArgumentError, AUDIT_USAGE unless limit&.between?(1, 100_000)
+
+                  { limit: limit }
+                else raise ArgumentError, AUDIT_USAGE
+                end
+      puts JSON.generate(Audit.new(config).report(shop, **options))
+      0
     end
 
     DELIVERIES_USAGE = "usage: bin/shopify-deliveries list SHOP [--state STATE] | retry SHOP WEBHOOK_ID"
