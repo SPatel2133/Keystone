@@ -171,6 +171,12 @@ After the fixes, the same run had 0 failures in 27 s.
 
 `bin/shopify-fuzz --postgres --processes --seed 700000 --runs 100 --steps 300` performed 30,000 operations with 0 failures in 498.0 s. They included 588 rounds of concurrent multi-machine `bin/shopify-pg-worker --drain` processes, 567 workers SIGKILLed mid-fetch and 1,433 reconciliations.
 
+## Fresh-clone run of the hardening branch
+
+`~/sprint/final.sh` was run against a fresh clone of `devin/1795087967-shopify-hardening` (3f5bb2d) in a path that contains a space. It ran `bin/check`, `bin/shopify-check` (with the PostgreSQL tests skipped, since no URL was set), repeated race tests, `bin/setup`, every demo (including the new ops-demo step 9), the whiteboard, both benchmark modes, both evidence commands, and the drain and ingest benchmarks. Afterwards the caller's ledger SHA was unchanged, and the script exited with `FINAL_EXIT=0`.
+
+The first attempt failed in `bin/shopify-demo --evidence`, with `Errno::EISDIR` on the new `test/support/shopify_fuzz/` directory. The evidence digest now covers nested source files and skips directories, and CI now runs that command too.
+
 ## Drain throughput: SQLite and PostgreSQL
 
 `ruby benchmark/shopify_drain.rb ORDERS 50 UPDATES [sqlite|postgres]` uses a fake Admin API that adds 50 ms of latency. Local Docker `postgres:16-alpine` was used, and a fuzz campaign was running on the same machine at the time.
