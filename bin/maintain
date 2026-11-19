@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require_relative "../lib/event_consumer/maintenance"
+
+abort "Usage: bin/maintain PATH_TO_EXISTING_LEDGER" unless ARGV.length == 1
+begin
+  puts JSON.generate(EventConsumer::Maintenance.run(ARGV.first))
+rescue SQLite3::BusyException, SQLite3::LockedException
+  abort "maintain: ledger is busy; retry when the writer finishes"
+rescue SQLite3::Exception, SystemCallError, ArgumentError => error
+  abort "maintain: #{error.message}"
+end
