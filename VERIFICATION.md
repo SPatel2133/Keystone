@@ -155,6 +155,13 @@ The fuzzer's `move_shop` operation crashes after the copy or after the switch. I
 
 After the fixes, the same run had 0 failures in 27 s.
 
+## Fuzzing the PostgreSQL worker
+
+| Run | Operations | Failures | Time |
+| --- | --- | --- | --- |
+| `bin/shopify-fuzz --postgres --seed 300000 --runs 500 --steps 300` | 150,000 | 0 | 330.8 s |
+| `--postgres --processes --seed 100 --runs 20 --steps 150` (52 concurrent multi-machine drains, 72 workers SIGKILLed mid-fetch) | 3,000 | 0 | 42.8 s |
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
