@@ -38,10 +38,13 @@ module ShopifyLedger
           raise Refused, "delivery not found" unless row
           raise Refused, "delivery already processed" if row[4] == 1
 
-          db.execute(<<~SQL, [shop, webhook_id])
+          updated = db.execute(<<~SQL, [shop, webhook_id])
             UPDATE inbox SET attempts = 0, next_attempt_at = 0, parked_at = NULL, requeues = requeues + 1
             WHERE shop = ? AND webhook_id = ? AND processed = 0
+            RETURNING webhook_id
           SQL
+          raise Refused, "delivery already processed" if updated.empty?
+
           describe(db.get_first_row("SELECT #{COLUMNS} FROM inbox WHERE shop = ? AND webhook_id = ?", [shop, webhook_id]))
         end
       end

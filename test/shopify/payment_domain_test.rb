@@ -1,5 +1,6 @@
 require "minitest/autorun"
 require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/payments"
 require_relative "../support/shopify_fixture"
 
 class ShopifyPaymentDomainTest < Minitest::Test
@@ -19,6 +20,20 @@ class ShopifyPaymentDomainTest < Minitest::Test
 
   def net(run, currency = "CAD")
     run.summary.fetch("totals").find { |row| row["currency"] == currency }&.fetch("net")
+  end
+
+  def test_stale_unknown_payment_event_read_does_not_overwrite_success
+    ShopifyFixture.run do |run|
+      run.summary
+      SQLite3::Database.new(run.database) do |db|
+        success = ShopifyLedger::Payments.entries(JSON.parse(JSON.generate([tx(201, "SALE", "100.00")]))).first
+        pending = ShopifyLedger::Payments.entries(JSON.parse(JSON.generate([tx(201, "SALE", "100.00", "CAD", "PENDING")]))).first
+        ShopifyLedger::Payments.observe(db, ALPHA, ORDER, success, Time.now.to_i)
+        ShopifyLedger::Payments.observe(StalePaymentEventDatabase.new(db), ALPHA, ORDER, pending, Time.now.to_i + 1)
+
+        assert_equal "SUCCESS", db.get_first_value("SELECT status FROM payment_events WHERE transaction_id = ?", [SALE])
+      end
+    end
   end
 
   def test_partial_captures_void_and_only_successful_payments_move_money
@@ -146,5 +161,26 @@ class ShopifyPaymentDomainTest < Minitest::Test
       assert_equal [["100.00", "EUR", "68.37"]], run.read("SELECT amount, presentment_currency, presentment_amount FROM transactions")
       assert_equal "100.00", net(run)
     end
+  end
+end
+
+class StalePaymentEventDatabase
+  def initialize(database)
+    @database = database
+    @stale = true
+  end
+
+  def get_first_row(statement, parameters = [])
+    row = @database.get_first_row(statement, parameters)
+    if @stale && statement.include?("FROM payment_events") && row
+      @stale = false
+      row = row.dup
+      row[7] = "UNKNOWN"
+    end
+    row
+  end
+
+  def execute(statement, parameters = [], &block)
+    @database.execute(statement, parameters, &block)
   end
 end

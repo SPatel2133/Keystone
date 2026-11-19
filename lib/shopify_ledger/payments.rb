@@ -157,8 +157,12 @@ module ShopifyLedger
       return if FINAL_STATUSES.include?(stored_status) && !FINAL_STATUSES.include?(entry.status)
       raise Error, "Transaction status changed from #{stored_status} to #{entry.status}" if FINAL_STATUSES.include?(stored_status)
 
-      db.execute("UPDATE payment_events SET status = ?, updated_at = ? WHERE shop = ? AND transaction_id = ?",
-                 [entry.status, now, shop, entry.id])
+      updated = db.execute(<<~SQL, [entry.status, now, shop, entry.id, stored_status])
+        UPDATE payment_events SET status = ?, updated_at = ?
+        WHERE shop = ? AND transaction_id = ? AND status = ?
+        RETURNING 1
+      SQL
+      return observe(db, shop, order_id, entry, now) if updated.empty?
     end
 
     # Facts Shopify allows but an operator should see: open (not yet final)
