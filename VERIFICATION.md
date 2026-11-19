@@ -109,6 +109,42 @@ Five `bin/shopify-backup` copies were taken in sequence while 4 `--drain` worker
 
 All runs completed 300 of 300 deliveries with net CAD 100.00. With several workers, a few fetches are wasted. Claims are per delivery, so two workers can fetch the same order at once. The second worker's recheck then finds its delivery already completed and discards the result. These extra fetches cost no correctness.
 
+## Randomized crash testing (bin/shopify-fuzz)
+
+| Run | Operations | Failures | Time |
+| --- | --- | --- | --- |
+| `bin/shopify-fuzz --seed 100000 --runs 2000 --steps 300` | 600,000 | 0 | 3,114 s (51 min 54 s wall), max RSS 227 MB |
+| `--seed 1000 --runs 100 --steps 300` | 30,000 | 0 | 150 s |
+| CI fixed seeds: 25 × 200 in process, 3 × 60 with `--processes` | 5,180 | 0 | about 30 s |
+
+The 2,000-run campaign included 19,940 crashes before commit and 20,338 after commit. It also included 20,090 claims left by dead workers, 40,469 Admin faults, 20,161 reconciliation runs with a failing page, 6,799 backups checked against the oracle, and 6,656 maintenance runs.
+
+- **Oracle check:** a planted wrong stored amount is reported, and the operation list is shrunk until the planted operation is last.
+- **Harness issue found and fixed:** with `--processes`, a SIGKILLed worker can leave a hot rollback journal. A `readonly: true` reader then raises `SQLite3::ReadOnlyException`. The checker now uses a writable connection.
+- **No ledger bug was found.**
+
+## Payment domain
+
+`test/shopify/payment_domain_test.rb` adds 7 tests. With them, `bin/check` passes 29 runs / 483 assertions and `bin/shopify-check` passes 66 runs / 732 assertions, with no failures.
+
+Mutation check of the extended fuzzer (5 runs × 200 steps, seed 1):
+
+| Mutant | Result |
+| --- | --- |
+| Count `PENDING` payments as money | Caught; shrunk to 1 operation |
+| Statuses never update | Caught at settle; shrunk to 3 operations |
+| Remove the stale-read guard | Not caught. It only causes retries, not wrong data. |
+| Overwrite presentment money on every fetch | Not caught, as expected: it changes nothing |
+
+## PostgreSQL workers
+
+Locally against Docker `postgres:16-alpine`, `test/shopify/postgres_test.rb` passes 4 runs / 69 assertions:
+- Four workers with different machine IDs drain 40 deliveries with 50 ms Admin latency. That takes exactly 40 Admin fetches, and the total is `830.00`.
+- Workers SIGKILLed before and after commit leave exactly one payment.
+- Admin 500s back off and then park the delivery.
+
+Hosted CI ran it against the `postgres:16` service container: `bin/shopify-check` passed 70 runs / 801 assertions with 0 skips.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.
