@@ -1,6 +1,7 @@
 name: Verify event consumers
 
 on:
+  push:
   pull_request:
 
 permissions:
@@ -23,6 +24,10 @@ jobs:
           scratch="$(mktemp -d)"
           trap 'rm -rf -- "$scratch"' EXIT
           cd "$scratch"
-          env -u BUNDLE_GEMFILE -u RUBYOPT "$GITHUB_WORKSPACE/bin/check"
-          env -u BUNDLE_GEMFILE -u RUBYOPT "$GITHUB_WORKSPACE/bin/shopify-check"
-          env -u BUNDLE_GEMFILE -u RUBYOPT "$GITHUB_WORKSPACE/bin/shopify-demo"
+          unset BUNDLE_GEMFILE RUBYOPT
+          "$GITHUB_WORKSPACE/bin/check"
+          "$GITHUB_WORKSPACE/bin/shopify-check"
+          "$GITHUB_WORKSPACE/bin/demo"
+          "$GITHUB_WORKSPACE/bin/inventory-demo"
+          "$GITHUB_WORKSPACE/bin/shopify-demo"
+          "$GITHUB_WORKSPACE/test/whiteboard"
