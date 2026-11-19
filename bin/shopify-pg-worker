@@ -3,10 +3,11 @@
 # Needs SHOPIFY_LEDGER_POSTGRES_URL and `bundle config set --local with postgres`.
 require_relative "../lib/event_consumer/bundle"
 require_relative "../lib/shopify_ledger/postgres"
+require_relative "../lib/shopify_ledger/deliveries"
 
 begin
   exit ShopifyLedger::Postgres.cli(ARGV)
-rescue ShopifyLedger::Admin::Error, ShopifyLedger::Payments::Error => error
+rescue ShopifyLedger::Admin::Error, ShopifyLedger::Payments::Error, ShopifyLedger::Deliveries::Refused => error
   warn "shopify ledger: #{error.class}: #{error.message}"
   exit 1
 rescue ArgumentError, LoadError => error

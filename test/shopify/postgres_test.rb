@@ -200,4 +200,32 @@ class ShopifyPostgresTest < Minitest::Test
       assert_equal 0, shop.fetch("payments").fetch("open_transactions")
     end
   end
+
+  def test_operators_list_retry_and_audit_deliveries_on_postgres
+    ShopifyFixture.run do |run|
+      run.configure(max_attempts: 1)
+      run.admin.arrange(ALPHA, "OrderPayments", order_gid(1), { errors: [{ message: "down" }] }, code: 500)
+      receive("sale", 1)
+      worker(run, "--once")
+      stdout, = worker(run, "deliveries", "list", ALPHA, "parked")
+      parked = JSON.parse(stdout).fetch("deliveries")
+      assert_equal [["sale", "parked", 1]], parked.map { |row| row.values_at("webhook_id", "state", "attempts") }
+
+      arrange_order(run, 1, "10.00")
+      stdout, stderr, status = worker(run, "deliveries", "retry", ALPHA, "sale")
+      assert status.success?, stderr
+      assert_equal ["pending", 1], JSON.parse(stdout).values_at("state", "requeues")
+      worker(run, "--once")
+      _stdout, stderr, status = worker(run, "deliveries", "retry", ALPHA, "sale")
+      assert_equal 1, status.exitstatus
+      assert_match(/already processed/, stderr)
+
+      stdout, stderr, status = worker(run, "audit", ALPHA, "--order", order_gid(1))
+      assert status.success?, stderr
+      audit = JSON.parse(stdout)
+      assert_equal [["delivery", "sale"]], audit.fetch("transactions").map { |row| row.values_at("recorded_by", "reference") }
+      assert_equal [["sale", "processed", 1]], audit.fetch("deliveries").map { |row| row.values_at("webhook_id", "state", "requeues") }
+      assert_equal "10.00", audit.fetch("totals").first.fetch("net")
+    end
+  end
 end

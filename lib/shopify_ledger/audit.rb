@@ -10,18 +10,15 @@ module ShopifyLedger
   class Audit
     DEFAULT_LIMIT = 500
 
-    def initialize(config)
+    def initialize(config, store: nil)
       @config = config
+      @store = store
     end
 
     def report(shop, order_id: nil, limit: DEFAULT_LIMIT)
-      Storage.new(@config.database_for(shop)).connect do |db|
-        db.transaction(:deferred)
-        begin
-          order_id ? order(db, shop, order_id) : shop_report(db, shop, limit)
-        ensure
-          db.rollback if db.transaction_active?
-        end
+      store = @store || Storage::Store.new(@config.database_for(shop))
+      store.connect do |db|
+        store.read(db) { order_id ? order(db, shop, order_id) : shop_report(db, shop, limit) }
       end
     end
 

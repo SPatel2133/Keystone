@@ -585,9 +585,9 @@ module ShopifyFuzz
     end
 
     def op_operator_retry(a, _b, _c)
-      ids = @pg.execute("SELECT id FROM inbox WHERE parked_at IS NOT NULL ORDER BY id").flatten
-      id = pick(ids, a) or return
-      @pg.execute("UPDATE inbox SET parked_at = NULL, attempts = 0, next_attempt_at = 0, last_error = NULL WHERE id = ?", [id])
+      parked = @pg.execute("SELECT shop, webhook_id FROM inbox WHERE parked_at IS NOT NULL ORDER BY id")
+      choice = pick(parked, a) or return
+      ShopifyLedger::Deliveries.new(@config, store: ShopifyLedger::Postgres::Store.new(@pg)).retry(*choice)
     end
 
     def worker_executable = "bin/shopify-pg-worker"

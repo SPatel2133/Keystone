@@ -34,6 +34,8 @@ module ShopifyLedger
         )
       SQL
       "CREATE INDEX IF NOT EXISTS inbox_eligible ON inbox (id) WHERE processed = 0 AND parked_at IS NULL",
+      "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS last_attempt_at BIGINT",
+      "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS requeues INTEGER NOT NULL DEFAULT 0",
       <<~SQL,
         CREATE TABLE IF NOT EXISTS transactions (
           shop TEXT NOT NULL,
@@ -203,7 +205,8 @@ module ShopifyLedger
 
           Payments.apply(db, shop, order_id, entries, source: "delivery:#{webhook_id}")
           db.execute(<<~SQL, [Time.now.to_i, shop, order_id, fence])
-            UPDATE inbox SET processed = 1, processed_at = ?, last_error = NULL, claimed_by = NULL, claimed_until = NULL
+            UPDATE inbox SET processed = 1, processed_at = ?, last_attempt_at = processed_at, last_error = NULL,
+                             claimed_by = NULL, claimed_until = NULL
             WHERE shop = ? AND order_id = ? AND processed = 0 AND parked_at IS NULL AND id <= ?
           SQL
           before_commit&.call
@@ -235,9 +238,9 @@ module ShopifyLedger
       def defer(id, attempts, error)
         now = Time.now.to_i
         parked = attempts + 1 >= @config.max_attempts
-        @db.execute(<<~SQL, [error.message, now + [2**(attempts + 1), 60].min, parked ? now : nil, id])
+        @db.execute(<<~SQL, [error.message, now + [2**(attempts + 1), 60].min, parked ? now : nil, now, id])
           UPDATE inbox SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, parked_at = ?,
-                           claimed_by = NULL, claimed_until = NULL
+                           last_attempt_at = ?, claimed_by = NULL, claimed_until = NULL
           WHERE id = ? AND processed = 0
         SQL
         Log.event(parked ? "delivery_parked" : "delivery_retry", delivery: id, error: "#{error.class}: #{error.message}")
@@ -272,11 +275,25 @@ module ShopifyLedger
         report = Status.new(config, store: Store.new(db)).report(shops)
         puts JSON.generate(generated_at: Time.now.utc.iso8601, shops: report)
         report.all? { |shop| shop[:health] == "ok" } ? 0 : 2
+      in ["audit", String => shop, *rest] if rest.empty? || (rest.size == 2 && rest.first == "--order")
+        require_relative "audit"
+        Config.load.api(shop)
+        puts JSON.generate(Audit.new(Config.load, store: Store.new(db)).report(shop, order_id: rest.last))
+        0
+      in ["deliveries", "list", String => shop, String => state]
+        require_relative "deliveries"
+        puts JSON.generate(shop: shop, deliveries: Deliveries.new(Config.load, store: Store.new(db)).list(shop, state))
+        0
+      in ["deliveries", "retry", String => shop, String => webhook_id]
+        require_relative "deliveries"
+        puts JSON.generate(Deliveries.new(Config.load, store: Store.new(db)).retry(shop, webhook_id))
+        0
       in ["summary", String => shop]
         puts JSON.generate(shop: shop, totals: Payments.summary(db, shop))
         0
       else
-        raise ArgumentError, "usage: bin/shopify-pg-worker --once | --drain | reconcile SHOP | status [SHOP...] | summary SHOP"
+        raise ArgumentError, "usage: bin/shopify-pg-worker --once | --drain | reconcile SHOP | status [SHOP...] | summary SHOP | " \
+                            "audit SHOP [--order ORDER_GID] | deliveries list SHOP STATE | deliveries retry SHOP WEBHOOK_ID"
       end
     ensure
       db&.close
