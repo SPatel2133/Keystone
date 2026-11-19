@@ -1,33 +1,58 @@
 require "etc"
 require "json"
+require "open3"
 require "tmpdir"
 require_relative "../lib/event_consumer/ledger"
 
 class LedgerBenchmark
-  SAMPLES = 1_000
-  BUFFERED = 10_000
+  LEDGER_CLI = File.expand_path("../bin/ledger", __dir__)
+  DATABASE = EventConsumer::Ledger::FILE_NAME
+  FULL = { unique: 100_000, buffered: 10_000, cli: 20 }.freeze
+  SMOKE = { unique: 50, buffered: 20, cli: 3 }.freeze
 
-  def initialize
+  def initialize(full: false)
+    @mode = full ? "full" : "smoke"
+    @counts = full ? FULL : SMOKE
     @ledger = EventConsumer::Ledger.new
   end
 
   def run
-    {
-      command: "bin/benchmark",
+    result = {
+      command: "bin/benchmark --#{@mode}",
       environment: environment,
       timing: {
-        implementation: "EventConsumer::Ledger#call, one Ruby process, one writer",
-        included: "SQLite open, BEGIN IMMEDIATE, schema check, delivery, COMMIT, close",
-        excluded: "Ruby/Bundler startup, JSON parsing and output, fixture setup, final verification",
-        clock: "CLOCK_MONOTONIC, nanoseconds",
-        latency: "Time from method invocation to receipt return, nearest-rank percentiles",
-        throughput: "Acknowledged requests divided by elapsed wall time of the timed loop",
-        fixture: "All deltas are +1. Each workload uses its own scratch database with the schema initialized."
-      },
-      ordered: in_scratch { timed_batch(retry_existing: false) },
-      identical_retries: in_scratch { timed_batch(retry_existing: true) },
-      gap_closure: in_scratch { gap_closure }
+        clock: "CLOCK_MONOTONIC (nanoseconds); nearest-rank p50/p95",
+        in_process: "One writer, one Ledger#call per request: open, BEGIN IMMEDIATE, schema check, deliver, COMMIT, close. Input construction, receipt verification and storage inspection are outside the timed batch.",
+        cli: "One fresh bin/ledger child per request. Includes spawn, Ruby and Bundler startup, JSON input/output, SQLite transaction and process exit.",
+        storage: "Main database plus -journal, -wal and -shm after all connections close, before and after ordered ingestion. No explicit WAL checkpoint.",
+        fixture: "Scratch databases, schema initialized, delta +1 for every sequence."
+      }
     }
+    in_scratch do
+      result[:sqlite_settings] = sqlite_settings
+      baseline = file_sizes
+      count = @counts.fetch(:unique)
+      requests = (1..count).map { |seq| request(seq) }
+      result[:ordered] = batch(requests, status: "accepted") { |req| @ledger.call(req) }
+      final = file_sizes
+      growth = final.values.sum - baseline.values.sum
+      result[:ordered][:storage] = {
+        baseline_bytes: baseline, final_bytes: final, growth_bytes: growth,
+        bytes_per_unique_event: growth.fdiv(count)
+      }
+      result[:identical_retries] = batch(requests, status: "duplicate") { |req| @ledger.call(req) }
+    end
+
+    result[:gap_closure] = in_scratch { gap_closure }
+    result[:cli_ordered] = in_scratch do
+      requests = (1..@counts.fetch(:cli)).map { |seq| request(seq) }
+      # Serialize inputs before timing. Child parsing and serialization are included.
+      inputs = requests.to_h { |req| [req.fetch("seq"), JSON.generate(req)] }
+      batch(requests, status: "accepted", cli: true) do |req|
+        Open3.capture3([LEDGER_CLI, LEDGER_CLI], stdin_data: inputs.fetch(req.fetch("seq")))
+      end
+    end
+    result
   end
 
   def self.batch_metrics(latencies_ns, elapsed_ns)
@@ -48,8 +73,8 @@ class LedgerBenchmark
     Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
   end
 
-  def request(sequence)
-    { "op" => "deliver", "seq" => sequence, "delta" => 1 }
+  def request(seq)
+    { "op" => "deliver", "seq" => seq, "delta" => 1 }
   end
 
   def in_scratch
@@ -62,78 +87,98 @@ class LedgerBenchmark
     end
   end
 
-  def verify_state(cursor, event_count)
-    db = SQLite3::Database.new(EventConsumer::Ledger::FILE_NAME, readonly: true)
-    # One SQL statement reads the checkpoint and row count at the same instant.
-    row = db.get_first_row(<<~SQL)
-      SELECT cursor, balance, (SELECT COUNT(*) FROM events)
-      FROM checkpoint WHERE id = 1
-    SQL
-    expected = [cursor, cursor.to_s, event_count]
+  def verify_state(cursor, count)
+    row = nil
+    SQLite3::Database.new(DATABASE, readonly: true) do |db|
+      row = db.get_first_row("SELECT cursor, balance, (SELECT COUNT(*) FROM events) FROM checkpoint WHERE id = 1")
+    end
+    expected = [cursor, cursor.to_s, count]
     raise "Expected durable state #{expected.inspect}, got #{row.inspect}" unless row == expected
 
     { cursor: row[0], balance: Integer(row[1], 10), unique_events: row[2] }
-  ensure
-    db&.close
   end
 
-  def verify_receipt(receipt, status, sequence, cursor)
-    expected = { status: status, seq: sequence, cursor: cursor, balance: cursor }
+  def verify_receipt(receipt, status, seq, cursor)
+    expected = { status: status, seq: seq, cursor: cursor, balance: cursor }
     raise "Expected #{expected.inspect}, got #{receipt.inspect}" unless expected == receipt
   end
 
-  def timed_batch(retry_existing:)
-    requests = (1..SAMPLES).map { |seq| request(seq) }
-    if retry_existing
-      requests.each { |req| verify_receipt(@ledger.call(req), "accepted", req["seq"], req["seq"]) }
-      verify_state(SAMPLES, SAMPLES)
-    end
-
-    receipts = Array.new(SAMPLES)
-    latencies = Array.new(SAMPLES)
+  def batch(requests, status:, cli: false)
+    receipts = Array.new(requests.length)
+    latencies = Array.new(requests.length)
     start = now_ns
     requests.each_with_index do |req, index|
       before = now_ns
-      receipt = @ledger.call(req)
+      receipts[index] = yield(req)
       latencies[index] = now_ns - before
-      receipts[index] = receipt
     end
     elapsed = now_ns - start
-
     receipts.each_with_index do |receipt, index|
+      if cli
+        stdout, stderr, exit_status = receipt
+        raise "CLI failed: #{exit_status.inspect}, #{stderr.inspect}" unless exit_status.success? && stderr.empty?
+        receipt = JSON.parse(stdout, symbolize_names: true)
+      end
       seq = index + 1
-      verify_receipt(receipt, retry_existing ? "duplicate" : "accepted", seq, retry_existing ? SAMPLES : seq)
+      verify_receipt(receipt, status, seq, status == "duplicate" ? requests.size : seq)
     end
-    self.class.batch_metrics(latencies, elapsed).merge(final_state: verify_state(SAMPLES, SAMPLES))
+    self.class.batch_metrics(latencies, elapsed).merge(final_state: verify_state(requests.size, requests.size))
   end
 
   def gap_closure
-    (2..BUFFERED + 1).each do |seq|
+    buffered = @counts.fetch(:buffered)
+    (2..buffered + 1).each do |seq|
       verify_receipt(@ledger.call(request(seq)), "accepted", seq, 0)
     end
-    pending = verify_state(0, BUFFERED)
+    pending = verify_state(0, buffered)
     closing = request(1)
     before = now_ns
     receipt = @ledger.call(closing)
     elapsed = now_ns - before
-    verify_receipt(receipt, "accepted", 1, BUFFERED + 1)
-    final = verify_state(BUFFERED + 1, BUFFERED + 1)
+    verify_receipt(receipt, "accepted", 1, buffered + 1)
     {
       samples: 1, elapsed_ms: elapsed / 1_000_000.0, before_close: pending,
-      buffered_events_applied: final.fetch(:cursor) - 1, final_state: final
+      buffered_events_applied: buffered, final_state: verify_state(buffered + 1, buffered + 1)
     }
+  end
+
+  def file_sizes
+    ["", "-journal", "-wal", "-shm"].to_h do |suffix|
+      path = DATABASE + suffix
+      [path, File.exist?(path) ? File.size(path) : 0]
+    end
+  end
+
+  def sqlite_settings
+    SQLite3::Database.new(DATABASE, readonly: true) do |db|
+      return {
+        journal_mode: db.get_first_value("PRAGMA journal_mode"),
+        synchronous: db.get_first_value("PRAGMA synchronous"),
+        page_size: db.get_first_value("PRAGMA page_size")
+      }
+    end
+  end
+
+  def sysctl(name)
+    output, _, status = Open3.capture3("/usr/sbin/sysctl", "-n", name)
+    output.strip if status.success?
   end
 
   def environment
     host = Etc.uname
-    db = SQLite3::Database.new(":memory:")
-    sqlite_version = db.get_first_value("SELECT sqlite_version()")
+    cpu, memory = case host.fetch(:sysname)
+                  when "Darwin"
+                    [sysctl("machdep.cpu.brand_string"),
+                     Integer(sysctl("hw.memsize"), exception: false)]
+                  when "Linux"
+                    [File.read("/proc/cpuinfo")[/^(?:model name|Hardware)\s*:\s*(.+)$/, 1],
+                     Integer(File.read("/proc/meminfo")[/^MemTotal:\s*(\d+)/, 1]) * 1024]
+                  end
     {
-      machine: host.fetch(:machine), os: host.fetch(:sysname), kernel: host.fetch(:release),
-      ruby: RUBY_DESCRIPTION, sqlite: sqlite_version, sqlite3_gem: SQLite3::VERSION,
-      bundler: Bundler::VERSION, minitest: Gem.loaded_specs.fetch("minitest").version.to_s
+      machine: host.fetch(:machine), cpu: cpu, memory_bytes: memory,
+      os: host.fetch(:sysname), kernel: host.fetch(:release),
+      ruby: RUBY_DESCRIPTION, sqlite: SQLite3::SQLITE_VERSION, sqlite3_gem: SQLite3::VERSION,
+      bundler: Bundler::VERSION
     }
-  ensure
-    db&.close
   end
 end

@@ -2,5 +2,5 @@
 require_relative "../lib/event_consumer/bundle"
 require_relative "../benchmark/ledger_benchmark"
 
-abort "Usage: bin/benchmark" unless ARGV.empty?
-puts JSON.pretty_generate(LedgerBenchmark.new.run)
+abort "Usage: bin/benchmark [--smoke|--full]" unless [[], ["--smoke"], ["--full"]].include?(ARGV)
+puts JSON.pretty_generate(LedgerBenchmark.new(full: ARGV == ["--full"]).run)
