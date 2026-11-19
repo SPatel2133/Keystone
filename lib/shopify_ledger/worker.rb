@@ -27,9 +27,10 @@ module ShopifyLedger
     # Processes eligible deliveries until none remain, `limit` outcomes are
     # recorded, or storage fails. A failed delivery is deferred by its backoff,
     # so draining always terminates.
-    def drain(limit: nil)
+    def drain(limit: nil, stop: nil)
       counts = { "processed" => 0, "retry" => 0, "parked" => 0 }
       loop do
+        return counts.merge("status" => "stopped") if stop&.call
         return counts.merge("status" => "limit") if limit && counts.values.sum >= limit
 
         outcome = step(nil, nil)
@@ -153,6 +154,13 @@ module ShopifyLedger
                                         coalesced_deliveries: coalesced)
       end
       result
+    rescue SQLite3::BusyException => error
+      outcome = record_busy_retry(delivery, error)
+      return unless outcome
+
+      Log.event("delivery_retry", shop: shop, delivery: webhook_id, order: order_id,
+                                  attempt: attempts + 1, error: "#{error.class}: #{error.message}")
+      outcome
     rescue Admin::Error, Payments::Error, SQLite3::Exception => error
       outcome = record_retry(delivery, error)
       return unless outcome
@@ -160,6 +168,24 @@ module ShopifyLedger
       Log.event("delivery_#{outcome}", shop: shop, delivery: webhook_id, order: order_id,
                                        attempt: attempts + 1, error: "#{error.class}: #{error.message}")
       outcome
+    end
+
+    def record_busy_retry(delivery, error)
+      id, _shop, _order_id, attempts, requeues = delivery
+      now = Time.now.to_i
+      @storage.connect do |db|
+        Storage.transaction(db) do
+          db.execute(<<~SQL, [now + self.class.delay(attempts), error.message, now, id, requeues])
+            UPDATE inbox SET next_attempt_at = ?, last_error = ?, last_attempt_at = ?,
+                             claimed_by = NULL, claimed_until = NULL
+            WHERE id = ? AND processed = 0 AND parked_at IS NULL AND requeues = ?
+          SQL
+          db.changes == 1 ? "retry" : nil
+        end
+      end
+    rescue SQLite3::Exception => storage_error
+      Log.event("delivery_retry_unrecorded", error: "#{storage_error.class}: #{storage_error.message}")
+      "retry"
     end
 
     # Returns "retry" or "parked", or nil when another worker changed the row first.

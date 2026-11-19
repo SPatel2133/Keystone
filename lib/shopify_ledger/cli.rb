@@ -91,7 +91,7 @@ module ShopifyLedger
       %w[TERM INT].each { |signal| Signal.trap(signal) { stopping = true } }
       totals = Hash.new(0)
       until stopping
-        counts = worker.drain(limit: 100)
+        counts = worker.drain(limit: 100, stop: -> { stopping })
         %w[processed retry parked].each { |key| totals[key] += counts[key] }
         sleep 1 if counts["status"] != "limit" && !stopping
       end
