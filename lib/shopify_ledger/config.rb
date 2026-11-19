@@ -33,6 +33,11 @@ module ShopifyLedger
       unless @api_attempts.is_a?(Integer) && @api_attempts.between?(1, 10)
         raise ArgumentError, "api_attempts must be an integer from 1 to 10"
       end
+      named = data.fetch("databases", {})
+      unless named.is_a?(Hash) && named.all? { |name, path| name.is_a?(String) && path.is_a?(String) && !path.empty? }
+        raise ArgumentError, "databases must map names to paths"
+      end
+      @databases = named.transform_values { |path| File.expand_path(path, directory).freeze }.freeze
       shops = data["shops"]
       raise ArgumentError, "configure at least one shop" unless shops.is_a?(Hash) && !shops.empty?
 
@@ -44,12 +49,32 @@ module ShopifyLedger
         token = required_string(settings, "token")
         endpoint = settings.fetch("endpoint", "https://#{shop}#{API_PATH}")
         validate_endpoint(endpoint, shop)
-        routes[shop] = { "endpoint" => endpoint.freeze, "token" => token.freeze }.freeze
+        route = settings["database"]
+        raise ArgumentError, "shop #{shop} names an unknown database" unless route.nil? || @databases.key?(route)
+
+        routes[shop] = { "endpoint" => endpoint.freeze, "token" => token.freeze,
+                         "database" => route ? @databases[route] : @database }.freeze
       end.freeze
     end
 
     def shops
       @shops.keys
+    end
+
+    # The SQLite file that holds a shop's inbox and ledger. Unrouted shops use
+    # the top-level database.
+    def database_for(shop)
+      @shops[shop]&.fetch("database") || @database
+    end
+
+    def database_named(name)
+      return @database if name.nil?
+
+      @databases.fetch(name) { raise ArgumentError, "unknown database #{name.inspect}" }
+    end
+
+    def all_databases
+      [@database, *@databases.values].uniq
     end
 
     def shop?(shop)

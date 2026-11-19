@@ -6,9 +6,13 @@ require_relative "storage"
 
 module ShopifyLedger
   class Worker
-    def initialize(config)
+    def initialize(config, database: config.database)
       @config = config
-      @storage = Storage.new(config.database, busy_timeout: BUSY_TIMEOUT_MS)
+      @storage = Storage.new(database, busy_timeout: BUSY_TIMEOUT_MS)
+      # A copy left behind by a shop move is not live; only the routed database is.
+      foreign = config.shops.reject { |shop| config.database_for(shop) == database }
+      @foreign_sql = foreign.empty? ? "" : " AND shop NOT IN (#{(['?'] * foreign.size).join(', ')})"
+      @foreign = foreign
     end
 
     BUSY_TIMEOUT_MS = 5000
@@ -61,10 +65,10 @@ module ShopifyLedger
       now = Time.now.to_i
       @storage.connect do |db|
         Storage.transaction(db) do
-          row = db.get_first_row(<<~SQL, [now, now]) || orphaned(db, now)
+          row = db.get_first_row(<<~SQL, [now, now, *@foreign]) || orphaned(db, now)
             SELECT id, shop, order_id, attempts, webhook_id FROM inbox INDEXED BY inbox_eligible
             WHERE processed = 0 AND parked_at IS NULL AND next_attempt_at <= ?
-              AND (claimed_until IS NULL OR claimed_until <= ?)
+              AND (claimed_until IS NULL OR claimed_until <= ?)#{@foreign_sql}
             ORDER BY id LIMIT 1
           SQL
           db.execute("UPDATE inbox SET claimed_by = ?, claimed_until = ? WHERE id = ?", [Process.pid, now + lease, row[0]]) if row
@@ -74,9 +78,9 @@ module ShopifyLedger
     end
 
     def orphaned(db, now)
-      orphan = db.execute(<<~SQL, [now]).find { |row| !alive?(row.last) }
+      orphan = db.execute(<<~SQL, [now, *@foreign]).find { |row| !alive?(row.last) }
         SELECT id, shop, order_id, attempts, webhook_id, claimed_by FROM inbox INDEXED BY inbox_eligible
-        WHERE processed = 0 AND parked_at IS NULL AND next_attempt_at <= ? AND claimed_by IS NOT NULL
+        WHERE processed = 0 AND parked_at IS NULL AND next_attempt_at <= ? AND claimed_by IS NOT NULL#{@foreign_sql}
         ORDER BY id
       SQL
       orphan&.first(5)

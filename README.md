@@ -237,6 +237,37 @@ cover workers SIGKILLed before and after commit, and backoff then parking.
 
 Webhook ingest, reconciliation and the operator commands still use SQLite.
 
+### Routing shops to databases and moving a shop
+
+A config can name extra SQLite files and route shops to them:
+
+```json
+{ "database": "shopify.sqlite3",
+  "databases": { "eu": "eu.sqlite3" },
+  "shops": { "beta.myshopify.com": { "token": "...", "database": "eu" } } }
+```
+
+Webhooks, reconciliation, summary, status, audit and the delivery tools follow
+the route. Shops without a route use `database`. A worker drains one file:
+`SHOPIFY_LEDGER_DATABASE=eu bin/shopify-worker --drain`. `bin/shopify-backup` and
+`bin/shopify-maintain` honour the same variable and report totals only for the
+shops routed to that file.
+
+`bin/shopify-move-shop SHOP --to NAME` moves a shop in three steps:
+1. It copies every inbox, ledger, payment-event and reconciliation row for the shop in one transaction. The copy is compared row for row with the source before commit.
+2. It switches the route by atomically replacing the config file (write, fsync, rename).
+3. It deletes the shop's rows from every other database, but only if every delivery and payment in them also exists in the routed copy.
+
+A crash after step 1 leaves the old route and an orphan copy, which the next run
+replaces. A crash after step 2 leaves the new route and a stale old copy, which
+the next run deletes, even after it has gone stale. If the old file has
+deliveries or payments that the routed copy lacks (a process still on the old
+route), cleanup refuses and leaves them for an operator.
+
+Stop ingest and workers for the shop before moving it, because running
+processes keep the route they loaded. Shopify retries webhooks that get no
+`200`, so a short ingest pause loses nothing.
+
 ### Randomized crash testing
 
 `bin/shopify-fuzz [--seed N] [--steps N] [--runs N] [--processes]` expands each

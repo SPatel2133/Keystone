@@ -17,7 +17,8 @@ module ShopifyLedger
 
         require_relative "maintenance"
         begin
-          puts JSON.generate(Maintenance.run(Config.load))
+          config = Config.load
+          puts JSON.generate(Maintenance.run(config, database: config.database_named(ENV["SHOPIFY_LEDGER_DATABASE"])))
         rescue SQLite3::BusyException, SQLite3::LockedException
           warn "shopify ledger: database is busy; retry maintenance during a quiet period"
           return 1
@@ -35,7 +36,7 @@ module ShopifyLedger
       config.api(shop)
       if command == :summary
         require_relative "payments"
-        totals = Storage.new(config.database).connect { |db| Payments.summary(db, shop) }
+        totals = Storage.new(config.database_for(shop)).connect { |db| Payments.summary(db, shop) }
         puts JSON.generate(shop: shop, totals: totals)
       else
         require_relative "reconciliation"
@@ -65,7 +66,9 @@ module ShopifyLedger
       raise ArgumentError, usage if hooks.any? && arguments != ["--once"]
 
       require_relative "worker"
-      worker = Worker.new(Config.load)
+      config = Config.load
+      # SHOPIFY_LEDGER_DATABASE names which routed database this worker drains.
+      worker = Worker.new(config, database: config.database_named(ENV["SHOPIFY_LEDGER_DATABASE"]))
       if arguments == ["--once"]
         status = worker.run_once(**hooks)
         puts JSON.generate(status: status)
@@ -112,7 +115,9 @@ module ShopifyLedger
       require_relative "backup"
       raise ArgumentError, "usage: bin/shopify-backup DESTINATION" unless arguments.size == 1
 
-      puts JSON.generate(Backup.new(Config.load).create(arguments.first))
+      config = Config.load
+      backup = Backup.new(config, database: config.database_named(ENV["SHOPIFY_LEDGER_DATABASE"]))
+      puts JSON.generate(backup.create(arguments.first))
       0
     rescue Backup::Refused => error
       warn "shopify ledger: backup refused: #{error.message}"

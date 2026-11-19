@@ -5,8 +5,9 @@ module ShopifyLedger
   # Validates the schema and runs VACUUM under SQLite exclusive locking mode,
   # so no webhook or worker can write between the check and the rebuild.
   module Maintenance
-    def self.run(config)
-      path = config.database
+    def self.run(config, database: config.database)
+      path = database
+      shops = config.shops.select { |shop| config.database_for(shop) == path }
       raise ArgumentError, "ledger database does not exist" unless File.exist?(path)
 
       SQLite3::Database.new(path, readwrite: true) do |db|
@@ -15,11 +16,11 @@ module ShopifyLedger
         db.execute("BEGIN EXCLUSIVE")
         raise ArgumentError, "incompatible Shopify ledger schema" unless Storage.catalog(db) == Storage.catalogs.last
 
-        totals = config.shops.to_h { |shop| [shop, Payments.summary(db, shop)] }
+        totals = shops.to_h { |shop| [shop, Payments.summary(db, shop)] }
         before = size(db, path)
         db.execute("COMMIT")
         db.execute("VACUUM")
-        after_totals = config.shops.to_h { |shop| [shop, Payments.summary(db, shop)] }
+        after_totals = shops.to_h { |shop| [shop, Payments.summary(db, shop)] }
         raise "totals changed during maintenance" unless after_totals == totals
 
         return { before: before, after: size(db, path), totals: totals }

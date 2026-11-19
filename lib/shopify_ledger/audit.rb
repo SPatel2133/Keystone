@@ -11,11 +11,11 @@ module ShopifyLedger
     DEFAULT_LIMIT = 500
 
     def initialize(config)
-      @storage = Storage.new(config.database)
+      @config = config
     end
 
     def report(shop, order_id: nil, limit: DEFAULT_LIMIT)
-      @storage.connect do |db|
+      Storage.new(@config.database_for(shop)).connect do |db|
         db.transaction(:deferred)
         begin
           order_id ? order(db, shop, order_id) : shop_report(db, shop, limit)

@@ -9,15 +9,16 @@ module ShopifyLedger
   class Backup
     class Refused < StandardError; end
 
-    def initialize(config)
+    def initialize(config, database: config.database)
       @config = config
-      @storage = Storage.new(config.database, busy_timeout: 5000)
+      @database = database
+      @storage = Storage.new(database, busy_timeout: 5000)
     end
 
     def create(destination)
       destination = File.expand_path(destination)
       raise Refused, "destination already exists" if File.exist?(destination)
-      raise Refused, "destination is the live database" if destination == File.expand_path(@config.database)
+      raise Refused, "destination is the live database" if destination == File.expand_path(@database)
 
       partial = "#{destination}.partial-#{Process.pid}"
       pages = @storage.connect do |source|
@@ -48,7 +49,8 @@ module ShopifyLedger
       raise Refused, "backup failed integrity check: #{integrity}" unless integrity == "ok"
       raise Refused, "backup schema does not match this version" unless Storage.catalog(db) == Storage.catalogs.last
 
-      totals = @config.shops.to_h { |shop| [shop, Payments.summary(db, shop)] }
+      shops = @config.shops.select { |shop| @config.database_for(shop) == @database }
+      totals = shops.to_h { |shop| [shop, Payments.summary(db, shop)] }
       { integrity: integrity, deliveries: db.get_first_value("SELECT COUNT(*) FROM inbox"),
         transactions: db.get_first_value("SELECT COUNT(*) FROM transactions"), totals: totals }
     ensure

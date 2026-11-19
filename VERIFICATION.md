@@ -145,6 +145,16 @@ Locally against Docker `postgres:16-alpine`, `test/shopify/postgres_test.rb` pas
 
 Hosted CI ran it against the `postgres:16` service container: `bin/shopify-check` passed 70 runs / 801 assertions with 0 skips.
 
+## Shop routing and moves
+
+`test/shopify/shop_routing_test.rb` passes 8 tests. With them, `bin/shopify-check` passes 78 runs / 880 assertions (with PostgreSQL).
+
+The fuzzer's `move_shop` operation crashes after the copy or after the switch. In a 30 runs × 200 steps run (seed 1, including 174 moves) it found two bugs. A regression test was written before each fix:
+1. Cleanup refused, forever, a stale orphan copy left by a crash after the copy.
+2. A worker draining a database that a shop had left processed the stale copy's deliveries.
+
+After the fixes, the same run had 0 failures in 27 s.
+
 ## Not run
 
 PostgreSQL, multi-host workers, and a real Shopify store or tunnel were not run. Operational logs were checked for shape only. No log shipping or alerting was configured.

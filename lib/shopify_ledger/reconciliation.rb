@@ -22,13 +22,13 @@ module ShopifyLedger
 
     def initialize(config, clock: -> { Time.now })
       @config = config
-      @storage = Storage.new(config.database)
       @clock = clock
     end
 
     # Returns the shop's checkpoint after finishing any interrupted window and
     # then one fresh window ending now.
     def run(shop)
+      @storage = Storage.new(@config.database_for(shop))
       admin = Admin.new(@config, shop)
       loop do
         run = open_run(shop)

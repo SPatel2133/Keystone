@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+# bin/shopify-move-shop SHOP --to DATABASE_NAME
+# Copies, verifies, switches the route and cleans up. Rerun after any crash.
+require_relative "../lib/event_consumer/bundle"
+require_relative "../lib/shopify_ledger/move_shop"
+
+exit ShopifyLedger::MoveShop.cli(ARGV)
