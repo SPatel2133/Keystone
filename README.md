@@ -63,7 +63,8 @@ operating commands. A poison delivery is parked, flagged by
 `bin/shopify-status` and recovered with `bin/shopify-deliveries retry`. A
 reconciliation run fails on page 2 and then resumes at page 2.
 `bin/shopify-audit` traces each total to the delivery or reconciliation run
-that recorded it.
+that recorded it. Finally, `bin/shopify-backup` writes a verified online
+snapshot whose totals match the live ledger.
 
 See the [Shopify verification runs](VERIFICATION.md#shopify-verification) and
 [recorded demo evidence](shopify-evidence.jsonl).
