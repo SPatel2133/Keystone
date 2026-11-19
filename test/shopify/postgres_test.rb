@@ -272,4 +272,29 @@ class ShopifyPostgresTest < Minitest::Test
       refute_nil @db.get_first_value("SELECT last_attempt_at FROM inbox")
     end
   end
+
+  # Found by fuzzer: workers completing different deliveries of one order at
+  # once locked inbox rows in different orders and could deadlock.
+  def test_concurrent_workers_on_the_same_orders_never_deadlock
+    ShopifyFixture.run do |run|
+      ENV["SHOPIFY_LEDGER_CONFIG"] = File.join(File.dirname(run.database), "config.json")
+      ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
+      config = ShopifyLedger::Config.load
+      1.upto(20) do |number|
+        arrange_order(run, number, "1.00", latency: 0.01)
+        3.times { |update| receive("d-#{number}-#{update}", number) }
+      end
+      connections = Array.new(4) { ShopifyLedger::Postgres::Database.new(URL) }
+      threads = connections.each_with_index.map do |db, index|
+        Thread.new { ShopifyLedger::Postgres::Worker.new(config, db, owner: "t#{index}").drain }
+      end
+      Timeout.timeout(60) { threads.each(&:value) }
+      assert_equal [[60]], @db.execute("SELECT SUM(processed) FROM inbox")
+      assert_equal "20.00", ShopifyLedger::Payments.summary(@db, ALPHA).first.fetch("net")
+    ensure
+      connections&.each(&:close)
+      ENV.delete("SHOPIFY_LEDGER_CONFIG")
+      ENV.delete("SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK")
+    end
+  end
 end

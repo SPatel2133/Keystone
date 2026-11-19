@@ -29,6 +29,24 @@ module ShopifyFuzz
       "crashed"
     end
 
+    # Every third worker step runs two workers at once on separate connections,
+    # so applies of one order can race inside PostgreSQL.
+    def op_worker(a, *)
+      return run_worker(a) unless (a % 3).zero?
+
+      connections = Array.new(2) { ShopifyLedger::Postgres::Database.new(URL) }
+      threads = connections.each_with_index.map do |db, index|
+        Thread.new { ShopifyLedger::Postgres::Worker.new(@config, db, owner: "thread-#{index}").run_once }
+      end
+      threads.map(&:value).each do |outcome|
+        fail!("unexpected worker outcome #{outcome.inspect}") unless %w[idle processed retry parked].include?(outcome)
+      end
+    rescue PG::Error => error
+      fail!("concurrent worker raised #{error.class}: #{error.message}")
+    ensure
+      connections&.each(&:close)
+    end
+
     # A worker on another machine died holding a lease.
     def op_orphan_claim(a, _b, _c)
       ids = @pg.execute("SELECT id FROM inbox WHERE processed = 0 AND parked_at IS NULL ORDER BY id").flatten

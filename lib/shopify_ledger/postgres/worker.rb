@@ -27,8 +27,11 @@ module ShopifyLedger
 
         entries = Payments.entries(Admin.new(@config, shop).order_transactions(order_id))
         applied = @db.transaction do |db|
-          # Applying is idempotent; this lock only stops two completions racing.
-          next false unless db.get_first_value("SELECT processed FROM inbox WHERE id = ? FOR UPDATE", [id]) == 0
+          # Lock every same-order row this completion may touch, in id order, so
+          # concurrent completions of one order queue instead of deadlocking.
+          db.execute("SELECT id FROM inbox WHERE shop = ? AND order_id = ? AND id <= ? ORDER BY id FOR UPDATE",
+                     [shop, order_id, fence])
+          next false unless db.get_first_value("SELECT processed FROM inbox WHERE id = ?", [id]) == 0
 
           Payments.apply(db, shop, order_id, entries, source: "delivery:#{webhook_id}")
           now = Time.now.to_i
