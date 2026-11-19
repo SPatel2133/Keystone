@@ -285,6 +285,12 @@ The operations include:
 `--processes` adds real `--drain` processes running concurrently, and workers
 SIGKILLed mid-fetch.
 
+`--postgres` runs the same operation lists against the PostgreSQL worker. It
+needs `SHOPIFY_LEDGER_POSTGRES_URL`. Reconciliation, backups, maintenance and
+shop moves are SQLite-only, so on PostgreSQL they are no-ops. The settle phase
+there sends one final webhook per order instead of reconciling. A dead worker's
+claim is a lease held by another machine, and "time passes" expires leases.
+
 After every step it checks that:
 1. No `(shop, transaction_id)` is stored twice.
 2. Every stored transaction matches the ground truth for shop, order, currency, kind and amount.

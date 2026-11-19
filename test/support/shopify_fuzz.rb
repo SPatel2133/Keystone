@@ -39,8 +39,8 @@ module ShopifyFuzz
   end
 
   # Runs one operation list; returns nil on success or a failure hash.
-  def self.execute(ops)
-    Execution.new(ops).call
+  def self.execute(ops, backend: :sqlite)
+    (backend == :postgres ? PostgresExecution : Execution).new(ops).call
     nil
   rescue Failure => error
     { "message" => error.message }
@@ -48,7 +48,7 @@ module ShopifyFuzz
 
   # Drops operations while the failure still reproduces: halving chunks first
   # for speed, then one operation at a time until nothing more can go.
-  def self.shrink(ops)
+  def self.shrink(ops, backend: :sqlite)
     current = ops
     chunk = [(current.size - 1) / 2, 1].max
     loop do
@@ -56,7 +56,7 @@ module ShopifyFuzz
       changed = false
       while index < current.size
         candidate = current[0...index] + (current[(index + chunk)..] || [])
-        if execute(candidate)
+        if execute(candidate, backend: backend)
           current = candidate
           changed = true
         else
@@ -71,7 +71,7 @@ module ShopifyFuzz
     end
   end
 
-  def self.campaign(seed:, runs:, steps:, processes: false, directory: nil, shrink: true)
+  def self.campaign(seed:, runs:, steps:, processes: false, directory: nil, shrink: true, backend: :sqlite)
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     counts = Hash.new(0)
     failures = []
@@ -79,12 +79,12 @@ module ShopifyFuzz
       run_seed = seed + index
       ops = generate(run_seed, steps, processes: processes)
       ops.drop(1).each { |op| counts[op["op"]] += 1 }
-      failure = execute(ops)
+      failure = execute(ops, backend: backend)
       next unless failure
 
-      minimal = shrink ? shrink(ops) : ops
-      record = { "seed" => run_seed, "steps" => steps, "processes" => processes, "failure" => failure,
-                 "minimized_failure" => execute(minimal), "ops" => minimal }
+      minimal = shrink ? shrink(ops, backend: backend) : ops
+      record = { "seed" => run_seed, "steps" => steps, "processes" => processes, "backend" => backend.to_s,
+                 "failure" => failure, "minimized_failure" => execute(minimal, backend: backend), "ops" => minimal }
       if directory
         FileUtils.mkdir_p(directory)
         record["file"] = File.join(directory, "fuzz-failure-#{run_seed}.json")
@@ -92,7 +92,8 @@ module ShopifyFuzz
       end
       failures << record
     end
-    { "seed" => seed, "runs" => runs, "steps" => steps, "processes" => processes, "operations" => counts.sort.to_h,
+    { "seed" => seed, "runs" => runs, "steps" => steps, "processes" => processes, "backend" => backend.to_s,
+      "operations" => counts.sort.to_h,
       "failures" => failures, "seconds" => (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(2) }
   end
 
@@ -409,22 +410,17 @@ module ShopifyFuzz
        truth[:presentment][1], format.call(BigDecimal(truth[:presentment][0])), truth[:parent]]
     end
 
-    def check_invariants(path, live: true)
-      # A SIGKILLed worker can leave a hot journal that only a writable connection may roll back.
-      db = SQLite3::Database.new(path)
-      db.busy_timeout(5000)
-      rows = db.execute(<<~SQL)
-        SELECT shop, transaction_id, order_id, currency, kind, amount, presentment_currency, presentment_amount,
-               parent_transaction_id
-        FROM transactions
-      SQL
+    EVENTS_SQL = "SELECT shop, transaction_id, kind, status, amount, presentment_currency FROM payment_events".freeze
+
+    # Invariants 1 and 2 plus payment statuses, for rows read from any backend.
+    def verify_rows(rows, events)
       keys = rows.map { |row| row.first(2) }
       fail!("a (shop, transaction_id) is stored twice") unless keys.uniq.size == keys.size
       rows.each do |shop, transaction_id, *stored|
         expected = expected_row(shop, transaction_id)
         fail!("stored #{shop} #{transaction_id} #{stored.inspect} is not in the ground truth (expected #{expected.inspect})") unless stored == expected
       end
-      db.execute("SELECT shop, transaction_id, kind, status, amount, presentment_currency FROM payment_events").each do |shop, id, kind, status, amount, presentment|
+      events.each do |shop, id, kind, status, amount, presentment|
         truth = @truth[[shop, id]]
         fail!("seen transaction #{shop} #{id} is not in the ground truth") unless truth
         same = [kind, amount, presentment] == [truth[:kind], ShopifyLedger::Payments.format_decimal(BigDecimal(truth[:amount]).abs), truth[:presentment][1]]
@@ -434,6 +430,18 @@ module ShopifyFuzz
           fail!("transaction #{id} stored as #{status} but Shopify says #{truth[:status]}")
         end
       end
+    end
+
+    def check_invariants(path, live: true)
+      # A SIGKILLed worker can leave a hot journal that only a writable connection may roll back.
+      db = SQLite3::Database.new(path)
+      db.busy_timeout(5000)
+      rows = db.execute(<<~SQL)
+        SELECT shop, transaction_id, order_id, currency, kind, amount, presentment_currency, presentment_amount,
+               parent_transaction_id
+        FROM transactions
+      SQL
+      verify_rows(rows, db.execute(EVENTS_SQL))
       both = db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 1 AND parked_at IS NOT NULL")
       fail!("#{both} deliveries are both processed and parked") unless both.zero?
       claimed = db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 1 AND claimed_by IS NOT NULL")
@@ -515,6 +523,105 @@ module ShopifyFuzz
         { "currency" => currency, "collected" => format.call(collected), "refunded" => format.call(refunded),
           "net" => format.call(collected - refunded) }
       end
+    end
+  end
+
+  # The same operation lists against the PostgreSQL worker. Reconciliation,
+  # backups, maintenance and moves are SQLite-only, so they do nothing here;
+  # settle instead sends one final webhook per order, as Shopify would.
+  class PostgresExecution < Execution
+    URL = ENV["SHOPIFY_LEDGER_POSTGRES_URL"]
+
+    private
+
+    def setup(orders)
+      super
+      require_relative "../../lib/shopify_ledger/postgres"
+      @pg&.close
+      @pg = ShopifyLedger::Postgres::Database.new(URL || raise(ArgumentError, "set SHOPIFY_LEDGER_POSTGRES_URL"))
+      @pg.execute("DROP TABLE IF EXISTS inbox, transactions, payment_events")
+      @pg.migrate
+    end
+
+    def receive(shop, webhook_id, topic, order_id)
+      ShopifyLedger::Postgres.receive(@pg, shop: shop, webhook_id: webhook_id, topic: topic, order_id: order_id)
+    end
+
+    def pg_worker(owner = "fuzz-machine") = ShopifyLedger::Postgres::Worker.new(@config, @pg, owner: owner)
+
+    def run_worker(_a, **hooks)
+      outcome = pg_worker.run_once(**hooks)
+      fail!("unexpected worker outcome #{outcome.inspect}") unless %w[idle processed retry parked].include?(outcome)
+      outcome
+    rescue Crash
+      "crashed"
+    end
+
+    # A worker on another machine died holding a lease.
+    def op_orphan_claim(a, _b, _c)
+      ids = @pg.execute("SELECT id FROM inbox WHERE processed = 0 AND parked_at IS NULL ORDER BY id").flatten
+      id = pick(ids, a) or return
+      @pg.execute("UPDATE inbox SET claimed_by = 'dead-machine', claimed_until = ? WHERE id = ?", [Time.now.to_i + 60, id])
+    end
+
+    # Time passes: backoffs and leases expire.
+    def op_advance_time(*)
+      @pg.execute(<<~SQL)
+        UPDATE inbox SET next_attempt_at = 0,
+                         claimed_until = CASE WHEN claimed_until IS NULL THEN NULL ELSE 0 END
+        WHERE processed = 0
+      SQL
+    end
+
+    def op_operator_retry(a, _b, _c)
+      ids = @pg.execute("SELECT id FROM inbox WHERE parked_at IS NOT NULL ORDER BY id").flatten
+      id = pick(ids, a) or return
+      @pg.execute("UPDATE inbox SET parked_at = NULL, attempts = 0, next_attempt_at = 0, last_error = NULL WHERE id = ?", [id])
+    end
+
+    %w[reconcile reconcile_failing_page backup maintain move_shop drain_processes kill_mid_fetch].each do |op|
+      define_method("op_#{op}") { |*| nil }
+    end
+
+    def check_invariants(path, live: true)
+      return unless path == @config.database
+
+      rows = @pg.execute(<<~SQL)
+        SELECT shop, transaction_id, order_id, currency, kind, amount, presentment_currency, presentment_amount,
+               parent_transaction_id
+        FROM transactions
+      SQL
+      verify_rows(rows, @pg.execute(EVENTS_SQL))
+      claimed = @pg.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 1 AND claimed_by IS NOT NULL")
+      fail!("#{claimed} processed deliveries still hold a lease") unless claimed.zero?
+    end
+
+    def settle
+      @orders.each_key { |key| arrange_truth(*key) }
+      @orders.each do |(shop, number), order|
+        receive(shop, "settle-#{number}", "orders/updated", gid(number)) unless order[:transactions].empty?
+      end
+      10.times do
+        @pg.execute("UPDATE inbox SET parked_at = NULL, attempts = 0 WHERE parked_at IS NOT NULL")
+        op_advance_time
+        pg_worker("settle-machine").drain
+        break if @pg.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0").zero?
+      end
+      check_invariants(@config.database)
+      pending = @pg.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0")
+      fail!("#{pending} deliveries never completed") unless pending.zero?
+      stale = @pg.execute("SELECT shop, transaction_id, status FROM payment_events")
+                 .reject { |shop, id, status| @truth.fetch([shop, id])[:status] == status }
+      fail!("statuses still lag after settle: #{stale.first(3).inspect}") unless stale.empty?
+      stored = @pg.execute("SELECT shop, transaction_id FROM transactions").to_set
+      expected = @truth.keys.select { |shop, id| expected_row(shop, id) }.to_set
+      fail!("missing after settle: #{(expected - stored).to_a.first(3).inspect}") unless (expected - stored).empty?
+      SHOPS.each do |shop|
+        fail!("totals for #{shop} differ from the model") unless ShopifyLedger::Payments.summary(@pg, shop) == model_totals(shop)
+      end
+    ensure
+      @pg&.close
+      @pg = nil
     end
   end
 end

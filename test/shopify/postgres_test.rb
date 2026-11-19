@@ -1,6 +1,7 @@
 require "minitest/autorun"
 require_relative "../../lib/event_consumer/bundle"
 require_relative "../support/shopify_fixture"
+require_relative "../support/shopify_fuzz"
 
 # Runs when SHOPIFY_LEDGER_POSTGRES_URL points at a disposable database (CI uses
 # a service container). Every test drops and recreates the ledger tables.
@@ -121,5 +122,11 @@ class ShopifyPostgresTest < Minitest::Test
       assert_equal [[0, 2, nil]], @db.execute("SELECT processed, attempts, claimed_by FROM inbox")
       refute_nil @db.get_first_value("SELECT parked_at FROM inbox")
     end
+  end
+
+  def test_fixed_fuzz_seeds_keep_every_invariant_on_postgres
+    report = ShopifyFuzz.campaign(seed: 20_261_119, runs: 25, steps: 200, backend: :postgres)
+    assert_empty report["failures"], JSON.pretty_generate(report["failures"])
+    assert_operator report["operations"].fetch("crash_before_commit"), :>, 0
   end
 end
