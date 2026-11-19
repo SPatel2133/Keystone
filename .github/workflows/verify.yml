@@ -14,16 +14,9 @@ jobs:
       BUNDLE_FROZEN: "true"
     steps:
       - uses: actions/checkout@v4
-      - name: Install SQLite development headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "2.6.10"
-          bundler: "1.17.2"
-      - name: Install locked gems
-        run: bundle install --deployment
+          bundler-cache: true
       - name: Test and demo from scratch
         shell: bash
         run: |
