@@ -3,7 +3,7 @@ require "fileutils"
 require "json"
 require "set"
 require_relative "shopify_fixture"
-%w[config storage inbox payments worker reconciliation deliveries backup maintenance].each do |name|
+%w[config storage inbox payments worker reconciliation deliveries backup maintenance move_shop].each do |name|
   require_relative "../../lib/shopify_ledger/#{name}"
 end
 
@@ -26,7 +26,7 @@ module ShopifyFuzz
     "deliver" => 18, "duplicate" => 6, "worker" => 16, "crash_before_commit" => 3, "crash_after_commit" => 3,
     "orphan_claim" => 3, "admin_fault" => 6, "mutate" => 16, "advance_time" => 5, "operator_retry" => 3,
     "reconcile" => 5, "reconcile_failing_page" => 3, "backup" => 1, "maintain" => 1, "complete_pending" => 4,
-    "admin_stale_read" => 3
+    "admin_stale_read" => 3, "move_shop" => 3
   }.freeze
   PROCESS_WEIGHTS = { "drain_processes" => 2, "kill_mid_fetch" => 2 }.freeze
 
@@ -111,7 +111,7 @@ module ShopifyFuzz
           @ops.drop(1).each_with_index do |op, index|
             @step = "step #{index + 1} #{op["op"]}"
             send("op_#{op["op"]}", op["a"], op["b"], op["c"])
-            check_invariants(@fixture.database)
+            @config.all_databases.each { |path| check_invariants(path) }
           end
           @step = "settle"
           settle
@@ -135,12 +135,13 @@ module ShopifyFuzz
     end
 
     def setup(orders)
-      @fixture.configure(max_attempts: 3)
-      ENV["SHOPIFY_LEDGER_CONFIG"] = File.join(File.dirname(@fixture.database), "config.json")
+      # Shops start in "main" and move between it and "eu".
+      @fixture.configure(max_attempts: 3, databases: { "main" => File.basename(@fixture.database), "eu" => "eu.sqlite3" })
+      @config_path = File.join(File.dirname(@fixture.database), "config.json")
+      ENV["SHOPIFY_LEDGER_CONFIG"] = @config_path
       ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
       @config = ShopifyLedger::Config.load
-      @storage = ShopifyLedger::Storage.new(@config.database, busy_timeout: 5000)
-      @inbox = ShopifyLedger::Inbox.new(@storage)
+      @storages = Hash.new { |cache, path| cache[path] = ShopifyLedger::Storage.new(path, busy_timeout: 5000) }
       @clock = Time.now
       @orders = SHOPS.product((1..orders).to_a).to_h do |shop, number|
         [[shop, number], { currency: CURRENCIES[(number + SHOPS.index(shop)) % 2], transactions: [], history: [] }]
@@ -153,7 +154,7 @@ module ShopifyFuzz
       @dead_pid = Process.spawn("true").tap { |pid| Process.wait(pid) }
       @orders.each_key { |key| arrange_truth(*key) }
       SHOPS.each { |shop| arrange_pages(shop) }
-      @storage.connect { |_db| nil }
+      @config.all_databases.each { |path| @storages[path].connect { |_db| nil } }
     end
 
     def gid(number) = "gid://shopify/Order/#{number}"
@@ -200,7 +201,7 @@ module ShopifyFuzz
     end
 
     def receive(shop, webhook_id, topic, order_id)
-      @inbox.receive(shop: shop, webhook_id: webhook_id, topic: topic, order_id: order_id)
+      ShopifyLedger::Inbox.new(@storages[@config.database_for(shop)]).receive(shop: shop, webhook_id: webhook_id, topic: topic, order_id: order_id)
     end
 
     def op_deliver(a, b, c)
@@ -216,22 +217,42 @@ module ShopifyFuzz
       fail!("duplicate delivery #{webhook[1]} was inserted twice") if receive(*webhook)
     end
 
-    def worker = ShopifyLedger::Worker.new(@config)
+    def database(value) = @config.all_databases[value % @config.all_databases.size]
+    def each_storage(&block) = @config.all_databases.map { |path| @storages[path].connect(&block) }
+    def worker(path = @config.database) = ShopifyLedger::Worker.new(@config, database: path)
 
-    def run_worker(**hooks)
-      outcome = worker.run_once(**hooks)
+    def run_worker(a, **hooks)
+      outcome = worker(database(a)).run_once(**hooks)
       fail!("unexpected worker outcome #{outcome.inspect}") unless %w[idle processed retry parked].include?(outcome)
       outcome
     rescue Crash
       "crashed"
     end
 
-    def op_worker(*) = run_worker
-    def op_crash_before_commit(*) = run_worker(before_commit: -> { raise Crash })
-    def op_crash_after_commit(*) = run_worker(after_commit: -> { raise Crash })
+    def op_worker(a, *) = run_worker(a)
+    def op_crash_before_commit(a, *) = run_worker(a, before_commit: -> { raise Crash })
+    def op_crash_after_commit(a, *) = run_worker(a, after_commit: -> { raise Crash })
 
-    def op_orphan_claim(a, _b, _c)
-      @storage.connect do |db|
+    # Moves a shop to the other database, sometimes crashing after the copy or the switch.
+    def op_move_shop(a, _b, c)
+      shop = SHOPS[a % SHOPS.size]
+      to = route_name(shop) == "eu" ? "main" : "eu"
+      seam = [nil, :after_copy, :after_switch][c % 3]
+      hooks = seam ? { seam => -> { raise Crash } } : {}
+      begin
+        ShopifyLedger::MoveShop.run(@config_path, shop, to, **hooks)
+      rescue Crash
+        nil
+      rescue ShopifyLedger::MoveShop::Refused => error
+        fail!("move refused: #{error.message}")
+      end
+      @config = ShopifyLedger::Config.load
+    end
+
+    def route_name(shop) = JSON.parse(File.read(@config_path)).dig("shops", shop, "database") || "main"
+
+    def op_orphan_claim(a, b, _c)
+      @storages[database(b)].connect do |db|
         ids = db.execute("SELECT id FROM inbox WHERE processed = 0 AND parked_at IS NULL ORDER BY id").flatten
         id = pick(ids, a) or next
         db.execute("UPDATE inbox SET claimed_by = ?, claimed_until = ? WHERE id = ?", [@dead_pid, Time.now.to_i + 3600, id])
@@ -303,14 +324,22 @@ module ShopifyFuzz
     end
 
     def op_advance_time(*)
-      @storage.connect { |db| db.execute("UPDATE inbox SET next_attempt_at = 0 WHERE processed = 0") }
+      each_storage { |db| db.execute("UPDATE inbox SET next_attempt_at = 0 WHERE processed = 0") }
     end
 
     def op_operator_retry(a, _b, _c)
-      parked = @storage.connect { |db| db.execute("SELECT shop, webhook_id FROM inbox WHERE parked_at IS NOT NULL ORDER BY id") }
+      parked = routed_parked
       choice = pick(parked, a) or return
       shop, webhook_id = choice
       ShopifyLedger::Deliveries.new(@config).retry(shop, webhook_id)
+    end
+
+    # Parked deliveries in each shop's routed database (stale copies elsewhere are not live).
+    def routed_parked
+      @config.all_databases.flat_map do |path|
+        rows = @storages[path].connect { |db| db.execute("SELECT shop, webhook_id FROM inbox WHERE parked_at IS NOT NULL ORDER BY id") }
+        rows.select { |shop, _| @config.database_for(shop) == path }
+      end
     end
 
     def reconcile(shop)
@@ -365,7 +394,7 @@ module ShopifyFuzz
 
     # Not generated: lets tests prove the oracle notices a wrong stored amount.
     def op_plant_wrong_amount(*)
-      @storage.connect do |db|
+      @storages[@config.database].connect do |db|
         db.execute("UPDATE transactions SET amount = amount || '1' WHERE rowid = (SELECT MIN(rowid) FROM transactions)")
       end
     end
@@ -424,6 +453,8 @@ module ShopifyFuzz
       return unless live
 
       db.execute("SELECT shop, synced_through FROM checkpoints").each do |shop, synced|
+        next unless @config.database_for(shop) == path
+
         previous = @checkpoints[shop]
         fail!("checkpoint for #{shop} moved backwards from #{previous} to #{synced}") if previous && synced < previous
         @checkpoints[shop] = synced
@@ -435,29 +466,39 @@ module ShopifyFuzz
     def settle
       @orders.each_key { |key| arrange_truth(*key) }
       SHOPS.each { |shop| arrange_pages(shop) }
+      # Finish any move that crashed: the rerun only cleans up stale copies.
+      SHOPS.each { |shop| ShopifyLedger::MoveShop.run(@config_path, shop, route_name(shop)) }
+      @config = ShopifyLedger::Config.load
       10.times do
-        parked = @storage.connect { |db| db.execute("SELECT shop, webhook_id FROM inbox WHERE parked_at IS NOT NULL") }
-        parked.each { |shop, webhook_id| ShopifyLedger::Deliveries.new(@config).retry(shop, webhook_id) }
+        routed_parked.each { |shop, webhook_id| ShopifyLedger::Deliveries.new(@config).retry(shop, webhook_id) }
         op_advance_time
-        counts = worker.drain
-        fail!("settle drain #{counts.inspect}") if counts["status"] == "storage_error"
-        break if @storage.connect { |db| db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0") }.zero?
+        @config.all_databases.each do |path|
+          counts = worker(path).drain
+          fail!("settle drain #{counts.inspect}") if counts["status"] == "storage_error"
+        end
+        break if each_storage { |db| db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0") }.sum.zero?
       end
       SHOPS.each do |shop|
         fail!("settle reconciliation failed for #{shop}") unless reconcile(shop)
       end
-      check_invariants(@fixture.database)
-      @storage.connect do |db|
-        pending = db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0")
-        fail!("#{pending} deliveries never completed") unless pending.zero?
-        stale = db.execute("SELECT shop, transaction_id, status FROM payment_events")
-                  .reject { |shop, id, status| @truth.fetch([shop, id])[:status] == status }
-        fail!("statuses still lag after settle: #{stale.first(3).inspect}") unless stale.empty?
-        stored = db.execute("SELECT shop, transaction_id FROM transactions").to_set
-        expected = @truth.keys.select { |shop, id| expected_row(shop, id) }.to_set
-        fail!("missing after settle: #{(expected - stored).to_a.first(3).inspect}") unless (expected - stored).empty?
-        SHOPS.each do |shop|
-          fail!("totals for #{shop} differ from the model") unless ShopifyLedger::Payments.summary(db, shop) == model_totals(shop)
+      @config.all_databases.each { |path| check_invariants(path) }
+      @config.all_databases.each do |path|
+        @storages[path].connect do |db|
+          pending = db.get_first_value("SELECT COUNT(*) FROM inbox WHERE processed = 0")
+          fail!("#{pending} deliveries never completed in #{File.basename(path)}") unless pending.zero?
+          stale = db.execute("SELECT shop, transaction_id, status FROM payment_events")
+                    .reject { |shop, id, status| @truth.fetch([shop, id])[:status] == status }
+          fail!("statuses still lag after settle: #{stale.first(3).inspect}") unless stale.empty?
+          SHOPS.each do |shop|
+            stored = db.execute("SELECT transaction_id FROM transactions WHERE shop = ?", [shop]).flatten.to_set
+            unless @config.database_for(shop) == path
+              fail!("#{shop} still has rows in #{File.basename(path)} after its move") unless stored.empty?
+              next
+            end
+            expected = @truth.keys.select { |truth_shop, id| truth_shop == shop && expected_row(shop, id) }.to_set { |_, id| id }
+            fail!("missing after settle: #{(expected - stored).to_a.first(3).inspect}") unless (expected - stored).empty?
+            fail!("totals for #{shop} differ from the model") unless ShopifyLedger::Payments.summary(db, shop) == model_totals(shop)
+          end
         end
       end
     end

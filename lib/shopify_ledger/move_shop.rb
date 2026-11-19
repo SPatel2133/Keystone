@@ -98,22 +98,28 @@ module ShopifyLedger
       File.rename(temporary, config_path)
     end
 
-    # Deletes the shop's rows from a database it no longer routes to, only if
-    # every table equals the routed copy; anything else needs an operator.
+    # Deletes the shop's rows from a database it no longer routes to. A stale
+    # copy (left by a crash, then outdated as the shop kept working) loses
+    # nothing when deleted. Deliveries or payments that the routed copy lacks
+    # were written after the copy by a process on the old route; those need an operator.
+    KEYS = { "inbox" => "webhook_id", "transactions" => "transaction_id", "payment_events" => "transaction_id" }.freeze
+
     def self.clean(path, destination, shop)
       return 0 unless File.exist?(path)
 
       attached(path, destination) do |db|
         Storage.transaction(db) do
-          tables = TABLES.select { |table| db.get_first_value("SELECT COUNT(*) FROM main.#{table} WHERE shop = ?", [shop]).positive? }
-          tables.each do |table|
-            list = columns(db, "main", table).join(", ")
-            next if rows(db, "main", table, shop, list) == rows(db, "other", table, shop, list)
+          KEYS.each do |table, key|
+            missing = db.get_first_value(<<~SQL, [shop, shop])
+              SELECT COUNT(*) FROM main.#{table}
+              WHERE shop = ? AND #{key} NOT IN (SELECT #{key} FROM other.#{table} WHERE shop = ?)
+            SQL
+            next if missing.zero?
 
-            raise Refused, "#{path} has #{table} rows for #{shop} that differ from the routed copy; " \
+            raise Refused, "#{path} has #{missing} #{table} rows for #{shop} that the routed copy lacks; " \
                            "stop ingest for the shop, then reconcile them by hand"
           end
-          tables.sum do |table|
+          TABLES.sum do |table|
             db.execute("DELETE FROM main.#{table} WHERE shop = ?", [shop])
             db.changes
           end

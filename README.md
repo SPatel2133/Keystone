@@ -254,13 +254,13 @@ the route. Shops without a route use `database`. A worker drains one file:
 `bin/shopify-move-shop SHOP --to NAME` moves a shop in three steps:
 1. It copies every inbox, ledger, payment-event and reconciliation row for the shop in one transaction. The copy is compared row for row with the source before commit.
 2. It switches the route by atomically replacing the config file (write, fsync, rename).
-3. It deletes the shop's rows from every other database, but only where they equal the routed copy.
+3. It deletes the shop's rows from every other database, but only if every delivery and payment in them also exists in the routed copy.
 
 A crash after step 1 leaves the old route and an orphan copy, which the next run
 replaces. A crash after step 2 leaves the new route and a stale old copy, which
-the next run deletes. If the old file gained rows after the copy (an ingest
-process still on the old route), cleanup refuses and leaves them for an
-operator.
+the next run deletes, even after it has gone stale. If the old file has
+deliveries or payments that the routed copy lacks (a process still on the old
+route), cleanup refuses and leaves them for an operator.
 
 Stop ingest and workers for the shop before moving it, because running
 processes keep the route they loaded. Shopify retries webhooks that get no

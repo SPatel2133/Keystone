@@ -8,7 +8,7 @@ class ShopifyShopRoutingTest < Minitest::Test
   def route(run, routes = {})
     path = File.join(File.dirname(run.database), "config.json")
     data = JSON.parse(File.read(path))
-    data["databases"] = { "eu" => "eu.sqlite3" }
+    data["databases"] = { "main" => File.basename(run.database), "eu" => "eu.sqlite3" }
     routes.each { |shop, name| data["shops"][shop]["database"] = name }
     File.write(path, JSON.generate(data))
     File.join(File.dirname(run.database), "eu.sqlite3")
@@ -127,6 +127,46 @@ class ShopifyShopRoutingTest < Minitest::Test
     end
   end
 
+  # Found by fuzzer: an orphan copy left by a crash after the copy goes stale as
+  # the shop keeps working on its old route. Cleanup refused it forever, although
+  # deleting it loses nothing.
+  def test_cleanup_deletes_a_stale_orphan_copy_left_by_a_crash_after_copy
+    ShopifyFixture.run do |run|
+      seed(run)
+      eu = route(run)
+      _stdout, _stderr, status = move(run, seam: "after_copy")
+      assert_equal 9, status.termsig
+      assert_equal({ "status" => "processed" }, run.worker)
+      before = counts(run.database)
+      _stdout, stderr, status = run.command("bin/shopify-move-shop", ALPHA, "--to", "main")
+      assert status.success?, stderr
+      assert_equal [0, 0, 0, 0, 0], counts(eu)
+      assert_equal before, counts(run.database)
+      assert_equal "100.00", run.summary.fetch("totals").first.fetch("net")
+    end
+  end
+
+  # Found by fuzzer: after a crash between switch and cleanup, a worker draining
+  # the old database processed the stale copy's pending delivery and recorded a
+  # payment there, which then blocked cleanup.
+  def test_a_worker_skips_deliveries_of_shops_routed_to_another_database
+    ShopifyFixture.run do |run|
+      seed(run)
+      eu = route(run)
+      _stdout, _stderr, status = move(run, seam: "after_switch")
+      assert_equal 9, status.termsig
+      run.admin.order([ShopifyFixture.transaction(SALE, "SALE", "100.00"), ShopifyFixture.transaction(REFUND, "REFUND", "25.00")])
+      assert_equal({ "status" => "idle" }, run.worker)
+      assert_equal [[1]], read(run.database, "SELECT COUNT(*) FROM transactions")
+      _stdout, stderr, status = move(run)
+      assert status.success?, stderr
+      with_database("eu") { assert_equal({ "status" => "processed" }, run.worker) }
+      assert_equal "75.00", run.summary.fetch("totals").first.fetch("net")
+      assert_equal [0, 0, 0, 0, 0], counts(run.database)
+      assert_equal [[2]], read(eu, "SELECT COUNT(*) FROM transactions")
+    end
+  end
+
   def test_cleanup_refuses_when_the_old_database_received_new_rows
     ShopifyFixture.run do |run|
       seed(run)
@@ -139,7 +179,7 @@ class ShopifyShopRoutingTest < Minitest::Test
       end
       _stdout, stderr, status = move(run)
       refute status.success?
-      assert_match(/inbox rows for #{Regexp.escape(ALPHA)} that differ from the routed copy/, stderr)
+      assert_match(/1 inbox rows for #{Regexp.escape(ALPHA)} that the routed copy lacks/, stderr)
       assert_equal 3, read(run.database, "SELECT COUNT(*) FROM inbox").first.first
     end
   end
