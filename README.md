@@ -250,7 +250,8 @@ cover workers SIGKILLed before and after commit, and backoff then parking.
 same PostgreSQL inbox, still after HMAC verification and before the `200`.
 Requests share one connection behind a mutex. A redelivery with a different
 topic or order gets `409`, and a database error returns `503` with
-`Retry-After`. The variable is separate from the URL, so a configured URL alone
+`Retry-After`. If the server drops the connection, that one delivery gets `503`
+and the connection is reset for the next one. The variable is separate from the URL, so a configured URL alone
 never moves ingest. Backup, maintenance and shop moves are SQLite-only.
 
 ### Routing shops to databases and moving a shop
