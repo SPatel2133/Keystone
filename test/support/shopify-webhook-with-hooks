@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/webhook"
+
+abort "expected SHOPIFY_TEST_CRASH=after_commit_before_ack" unless ENV["SHOPIFY_TEST_CRASH"] == "after_commit_before_ack"
+
+ShopifyLedger::Webhook.run(after_commit: -> { Process.kill("KILL", Process.pid) })

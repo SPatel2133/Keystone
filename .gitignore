@@ -1,3 +1,5 @@
 /.bundle/
 /vendor/bundle/
 /ledger.sqlite3*
+/shopify.sqlite3*
+/shopify-ledger.local.json

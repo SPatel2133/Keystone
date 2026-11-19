@@ -48,3 +48,86 @@ The recovery tests verify process death on one host with one local SQLite databa
 1. What stored fact proves event 3 was received but remains unapplied?
 2. Why do the two retries yield different receipts with the same final balance?
 3. What changes if the missing sequence never arrives?
+
+## Shopify order and refund ledger
+
+The Shopify path uses a separate SQLite database and leaves the sequence-based
+consumer available through `bin/ledger`. Run `bin/shopify-check` for the
+black-box Shopify suite and `bin/shopify-demo` for the replay and reconciliation
+demo. Both use disposable databases and a local fake Shopify GraphQL server.
+They require no Shopify account, credentials, or webhook tunnel.
+
+```sh
+bundle check
+bin/check
+bin/shopify-check
+bin/shopify-demo
+bin/shopify-demo --evidence > shopify-evidence.jsonl
+```
+
+See the [Shopify verification runs](VERIFICATION.md#shopify-verification) and
+[recorded demo evidence](shopify-evidence.jsonl).
+
+The same lockfile covers both paths. The CI workflow targets Ubuntu 22.04 with
+Ruby 2.6.10, Bundler 1.17.2, sqlite3 1.3.13, and Minitest 5.11.3. Install a C
+compiler and SQLite headers for a source build. Ruby 2.6 is end of life and is
+retained here to match the available local runtime and the existing CLI. Use a
+supported runtime before deploying an Internet-facing service.
+
+### Running the Shopify commands
+
+Set `SHOPIFY_LEDGER_CONFIG` to the path of a local JSON configuration. The
+database path is resolved relative to that file. Keep the file outside version
+control and use a different database from the original ledger.
+
+```json
+{
+  "database": "shopify.sqlite3",
+  "secret": "REPLACE_WITH_APP_CLIENT_SECRET",
+  "shops": {
+    "example.myshopify.com": {
+      "token": "REPLACE_WITH_ADMIN_ACCESS_TOKEN"
+    }
+  }
+}
+```
+
+```sh
+export SHOPIFY_LEDGER_CONFIG=/path/to/shopify-ledger.local.json
+bin/shopify-webhook
+```
+
+The service listens on IPv4 localhost at port 9292 by default. Set
+`SHOPIFY_LEDGER_PORT` to change it. Register `orders/updated` and
+`refunds/create` on an HTTPS endpoint that routes `POST /webhooks` to the
+service and limits request body size. For order reads, use a configured shop token with `read_orders` and
+Shopify's applicable data permissions. Trusted configuration selects the
+destination and token. The HTTP loopback override is used by the synthetic
+fixtures.
+
+From another terminal with the same configuration:
+
+```sh
+bin/shopify-worker --once
+bin/shopify-summary example.myshopify.com
+bin/reconcile example.myshopify.com
+```
+
+`--once` processes one eligible delivery. It reports `processed`, `idle`, or
+`retry`. A retry exits nonzero and defers the delivery for 2, 4, 8, 16, 32,
+then at most 60 seconds per attempt. The worker selects the oldest eligible
+delivery and can process other orders while a failure backs off. Invoke the
+worker repeatedly to drain the inbox.
+
+### Storage and recovery
+
+- Verify the Shopify signature over the raw body before JSON parsing. Store only shop, delivery ID, topic, and order ID plus processing metadata. Return HTTP 200 after committing a new delivery or confirming a matching retry. Reusing the same shop and delivery ID for a different order or topic returns HTTP 409. The first delivery remains available to the worker.
+- The worker fetches a complete order transaction set through Admin GraphQL `2026-10` outside the SQLite write transaction. It requires an exact transaction count and distinct IDs. It counts successful sales and captures as collected, and successful refunds as positive refunds. Net is collected minus refunded. Totals are exact decimal strings separated by shop and shop currency. They describe observed order payment transactions.
+- Worker writes and the inbox processed flag commit together. A delivery ID deduplicates HTTP retries, and a transaction ID deduplicates payment effects across different deliveries. Shopify webhook delivery order is irrelevant because each accepted delivery points to the current order transactions.
+- Reconciliation reads a fixed window of changed orders using `UPDATED_AT`. It saves the start of the first seven-day window before fetching page one. A retry keeps that starting point even if the first scan failed days ago. After a successful run, later scans start five minutes before the completed checkpoint. Failed scans can leave imported orders durable while preserving the checkpoint for replay. Recovery covers the chosen window and the shop's authorized order history.
+- Older Shopify ledger databases upgrade automatically in a SQLite transaction. Commands verify the application tables before reporting merchant totals. An incompatible database produces an error.
+- The demo proves recovery from process death on one host. Verification uses synthetic Shopify responses and a single SQLite database. A live Shopify installation, power loss, and multi-host operation are outside the verified scope.
+
+[Shopify webhook verification](https://shopify.dev/docs/apps/build/webhooks/verify-deliveries) ·
+[Order transaction schema](https://shopify.dev/docs/api/admin-graphql/2026-10/objects/OrderTransaction) ·
+[Order reconciliation query](https://shopify.dev/docs/api/admin-graphql/2026-10/queries/orders)

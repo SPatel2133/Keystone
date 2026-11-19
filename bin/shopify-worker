@@ -1,0 +1,4 @@
+#!/usr/bin/env ruby
+require_relative "../lib/shopify_ledger/cli"
+
+exit ShopifyLedger::CLI.run(:worker, ARGV)

@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require "minitest/autorun"
+
+files = Dir[File.expand_path("../test/shopify/*_test.rb", __dir__)].sort
+abort "no Shopify tests found" if files.empty?
+files.each { |test| require test }

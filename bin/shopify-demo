@@ -1,0 +1,56 @@
+#!/usr/bin/env ruby
+require_relative "../lib/event_consumer/bundle"
+require_relative "../test/support/shopify_scenarios"
+require "digest"
+
+abort "usage: bin/shopify-demo [--evidence]" unless ARGV.empty? || ARGV == ["--evidence"]
+
+before_commit = ShopifyScenarios.worker_crash("before_commit")
+after_commit = ShopifyScenarios.worker_crash("after_commit")
+missed = ShopifyScenarios.missed_webhook
+
+if ARGV == ["--evidence"]
+  project = File.expand_path("..", __dir__)
+  paths = %w[Gemfile Gemfile.lock .github/workflows/verify.yml bin/reconcile bin/shopify-*
+             lib/event_consumer/bundle.rb lib/shopify_ledger/*.rb
+             test/shopify/*.rb test/support/crash_harness.rb test/support/shopify*]
+  digest = Digest::SHA256.new
+  Dir.chdir(project) do
+    Dir.glob(paths).sort.each do |path|
+      digest.update(path + "\0" + Digest::SHA256.file(path).hexdigest + "\n")
+    end
+  end
+  sqlite = SQLite3::Database.new(":memory:")
+  version = sqlite.get_first_value("SELECT sqlite_version()")
+  sqlite.close
+  metadata = { type: "metadata", ruby: RUBY_DESCRIPTION, bundler: Bundler::VERSION,
+               sqlite3_gem: SQLite3::VERSION, sqlite: version, source_sha256: digest.hexdigest }
+  records = [metadata, before_commit, after_commit, missed,
+             ShopifyScenarios.lost_webhook_ack, ShopifyScenarios.reconciliation_retry]
+  records.each { |record| puts JSON.generate(record) }
+else
+  puts "Order 101: CAD 100.00 sale followed by a CAD 25.00 refund."
+  [before_commit, after_commit].each do |record|
+    durable = record.fetch("before_restart")
+    refund_delivery = durable.fetch("inbox").find { |row| row[1] == "refund-notice" }
+    delivery_status = refund_delivery.last == 1 ? "processed" : "pending"
+    payments = durable.fetch("transactions").map do |_shop, _id, currency, kind, amount|
+      "#{kind} #{currency} #{amount}"
+    end
+    puts
+    puts "Worker killed #{record.fetch("seam")} (signal #{record.fetch("child").fetch("signal")})"
+    puts "  SQLite before restart: #{payments.join(", ")}"
+    puts "  Refund delivery: #{delivery_status}"
+    puts "  Restart: #{record.fetch("restart").fetch("status")}"
+    summary = record.fetch("summary").fetch("totals").first
+    puts "  #{summary.fetch("currency")} #{summary.fetch("collected")} collected, " \
+         "#{summary.fetch("refunded")} refunded, #{summary.fetch("net")} net"
+  end
+
+  puts
+  puts "Missed refund webhook"
+  prior = missed.fetch("before").fetch("totals").first
+  repaired = missed.fetch("summary").fetch("totals").first
+  puts "  Reconciliation corrected #{prior.fetch("currency")} #{prior.fetch("net")} net " \
+       "to #{repaired.fetch("currency")} #{repaired.fetch("net")} net"
+end
