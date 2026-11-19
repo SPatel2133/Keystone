@@ -228,4 +228,21 @@ class ShopifyPostgresTest < Minitest::Test
       assert_equal "10.00", audit.fetch("totals").first.fetch("net")
     end
   end
+
+  def test_webhook_ingest_reconnects_after_the_database_drops_its_connection
+    ShopifyFixture.run do |run|
+      ENV["SHOPIFY_LEDGER_INBOX"] = "postgres"
+      run.with_endpoint do
+        assert_equal 200, run.deliver("before")
+        @db.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity " \
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid()")
+        assert_equal 503, run.deliver("during"), "the delivery is not acknowledged, so Shopify retries it"
+        assert_equal 200, run.deliver("during")
+        assert_equal 200, run.deliver("after")
+      end
+      assert_equal [["before"], ["during"], ["after"]], @db.execute("SELECT webhook_id FROM inbox ORDER BY id")
+    ensure
+      ENV.delete("SHOPIFY_LEDGER_INBOX")
+    end
+  end
 end

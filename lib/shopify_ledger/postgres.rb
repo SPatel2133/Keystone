@@ -117,6 +117,7 @@ module ShopifyLedger
       def get_first_value(statement, parameters = []) = get_first_row(statement, parameters)&.first
       def transaction(&block) = @connection.transaction { block.call(self) }
       def close = @connection.close
+      def reset = @connection.reset
 
       def migrate
         SCHEMA.each { |statement| @connection.exec(statement) }
@@ -167,6 +168,14 @@ module ShopifyLedger
       def receive(shop:, webhook_id:, topic:, order_id:, after_commit: nil)
         inserted = @mutex.synchronize do
           Postgres.receive(@db, shop: shop, webhook_id: webhook_id, topic: topic, order_id: order_id)
+        rescue PG::ConnectionBad, PG::UnableToSend
+          # This delivery gets a 503 and is redelivered; the next one uses a fresh connection.
+          begin
+            @db.reset
+          rescue PG::Error
+            nil
+          end
+          raise
         end
         after_commit&.call if inserted
         inserted
