@@ -39,10 +39,10 @@ module ShopifyLedger
     # --once prints one outcome; --drain prints counts and stops when idle.
     # Both exit 1 when any delivery was deferred or parked.
     def self.worker(arguments, hooks)
-      usage = "usage: bin/shopify-worker --once | --drain [--limit N]"
+      usage = "usage: bin/shopify-worker --once | --drain [--limit N] | --watch"
       limit = nil
       case arguments
-      in ["--once"]
+      in ["--once"] | ["--watch"]
       in ["--drain"]
       in ["--drain", "--limit", String => count]
         limit = Integer(count, 10, exception: false)
@@ -60,6 +60,8 @@ module ShopifyLedger
         return %w[retry parked].include?(status) ? 1 : 0
       end
 
+      return watch(worker) if arguments == ["--watch"]
+
       counts = worker.drain(limit: limit)
       puts JSON.generate(counts)
       counts.values_at("retry", "parked").sum.zero? && counts["status"] != "storage_error" ? 0 : 1
@@ -67,6 +69,21 @@ module ShopifyLedger
 
     # Reconciles every configured shop in order. One shop's failure is reported
     # and does not stop the others; the exit status is 1 if any shop failed.
+    # Drains, then polls once a second. SIGTERM or SIGINT stops after the
+    # current delivery, so a deploy never interrupts a commit.
+    def self.watch(worker)
+      stopping = false
+      %w[TERM INT].each { |signal| Signal.trap(signal) { stopping = true } }
+      totals = Hash.new(0)
+      until stopping
+        counts = worker.drain(limit: 100)
+        %w[processed retry parked].each { |key| totals[key] += counts[key] }
+        sleep 1 if counts["status"] != "limit" && !stopping
+      end
+      puts JSON.generate(totals.merge("status" => "stopped"))
+      0
+    end
+
     def self.reconcile_all
       require_relative "reconciliation"
       config = Config.load

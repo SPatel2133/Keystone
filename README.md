@@ -106,6 +106,7 @@ From another terminal with the same configuration:
 ```sh
 bin/shopify-worker --once
 bin/shopify-worker --drain            # until idle; add --limit N to cap outcomes
+bin/shopify-worker --watch            # drain, poll every second; SIGTERM stops after the current delivery
 bin/shopify-summary example.myshopify.com
 bin/reconcile example.myshopify.com
 ```

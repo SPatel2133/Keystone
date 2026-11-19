@@ -80,13 +80,28 @@ class ShopifyDrainTest < Minitest::Test
     end
   end
 
+  def test_watch_processes_new_deliveries_and_stops_cleanly_on_sigterm
+    ShopifyFixture.run do |run|
+      run.admin.order([ShopifyScenarios.sale])
+      stdin, stdout, stderr, waiter = run.spawn("bin/shopify-worker", "--watch")
+      stdin.close
+      run.with_endpoint { assert_equal 200, run.deliver("late") }
+      deadline = Time.now + 10
+      sleep 0.1 until run.read("SELECT processed FROM inbox") == [[1]] || Time.now > deadline
+      Process.kill("TERM", waiter.pid)
+      assert waiter.value.success?
+      stderr.read
+      assert_equal({ "processed" => 1, "retry" => 0, "parked" => 0, "status" => "stopped" }, JSON.parse(stdout.read))
+    end
+  end
+
   def test_worker_rejects_bad_drain_arguments
     ShopifyFixture.run do |run|
       [%w[--drain --limit 0], %w[--drain --limit x], %w[--drain --limit], %w[--drain --once], []].each do |args|
         stdout, stderr, process = run.command("bin/shopify-worker", *args)
         assert_equal 1, process.exitstatus, args.inspect
         assert_empty stdout
-        assert_includes stderr, "usage: bin/shopify-worker --once | --drain [--limit N]"
+        assert_includes stderr, "usage: bin/shopify-worker --once | --drain [--limit N] | --watch"
       end
     end
   end
