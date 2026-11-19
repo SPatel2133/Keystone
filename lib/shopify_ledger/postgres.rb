@@ -130,29 +130,9 @@ module ShopifyLedger
       def migrate
         @connection.transaction do
           @connection.exec("SELECT pg_advisory_xact_lock(7243105118)")
-          SCHEMA.each { |statement| @connection.exec(statement) } unless schema_ready?
+          SCHEMA.each { |statement| @connection.exec(statement) }
         end
         self
-      end
-
-      private
-
-      def schema_ready?
-        @connection.exec(<<~SQL).getvalue(0, 0) == true
-          SELECT to_regclass('inbox') IS NOT NULL
-            AND to_regclass('inbox_eligible') IS NOT NULL
-            AND to_regclass('transactions') IS NOT NULL
-            AND to_regclass('payment_events') IS NOT NULL
-            AND to_regclass('payment_events_by_shop_order') IS NOT NULL
-            AND to_regclass('checkpoints') IS NOT NULL
-            AND to_regclass('reconciliation_starts') IS NOT NULL
-            AND to_regclass('reconciliation_runs') IS NOT NULL
-            AND to_regclass('one_open_run_per_shop') IS NOT NULL
-            AND EXISTS (SELECT 1 FROM information_schema.columns
-                        WHERE table_schema = current_schema() AND table_name = 'inbox' AND column_name = 'last_attempt_at')
-            AND EXISTS (SELECT 1 FROM information_schema.columns
-                        WHERE table_schema = current_schema() AND table_name = 'inbox' AND column_name = 'requeues')
-        SQL
       end
     end
 
