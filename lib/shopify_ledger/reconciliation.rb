@@ -35,10 +35,7 @@ module ShopifyLedger
 
       config_path = @config.path
       mode = File.stat(config_path).mode & 0o7777
-      lock_path = "#{config_path}.lock"
-      File.open(lock_path, File::RDWR | File::CREAT, mode) do |lock|
-        File.chmod(mode, lock_path)
-        lock.flock(File::LOCK_SH)
+      with_config_lock(config_path, mode) do
         @config = Config.read(config_path)
         @storage = Storage::Store.new(@config.database_for(shop))
         run_with_storage(shop)
@@ -46,6 +43,26 @@ module ShopifyLedger
     end
 
     private
+
+    def with_config_lock(config_path, mode)
+      lock_path = "#{config_path}.lock"
+      lock = nil
+      begin
+        lock = File.open(lock_path, File::RDWR | File::CREAT, mode)
+        File.chmod(mode, lock_path)
+      rescue Errno::EACCES, Errno::EROFS
+        lock&.close
+        lock = File.open(lock_path, File::RDONLY) if File.exist?(lock_path)
+      end
+      return yield unless lock
+
+      begin
+        lock.flock(File::LOCK_SH)
+        yield
+      ensure
+        lock.close
+      end
+    end
 
     def run_with_storage(shop)
       @storage = @store || Storage::Store.new(@config.database_for(shop))

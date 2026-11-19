@@ -351,4 +351,37 @@ class ShopifyShopRoutingTest < Minitest::Test
       assert_equal 0o640, File.stat(config_path).mode & 0o7777
     end
   end
+
+  def test_reconciliation_succeeds_with_read_only_config_directory
+    skip "read-only directory test requires a non-root user" if Process.uid.zero?
+
+    ShopifyFixture.run do |run|
+      run.summary
+      run.admin.order([ShopifyFixture.transaction(SALE, "SALE", "100.00")])
+      run.admin.page([ORDER])
+      config_directory = File.join(File.dirname(run.database), "readonly-config")
+      Dir.mkdir(config_directory)
+      config_path = File.join(config_directory, "config.json")
+      data = JSON.parse(File.read(File.join(File.dirname(run.database), "config.json")))
+      data["database"] = run.database
+      File.write(config_path, JSON.generate(data))
+      config = loaded_config(config_path)
+      lock_path = "#{config_path}.lock"
+      File.write(lock_path, "")
+      File.chmod(0o444, lock_path)
+      original_mode = File.stat(config_directory).mode & 0o7777
+      File.chmod(0o555, config_directory)
+
+      begin
+        refute_nil ShopifyLedger::Reconciliation.new(config).run(ALPHA)
+
+        File.chmod(original_mode, config_directory)
+        File.unlink(lock_path)
+        File.chmod(0o555, config_directory)
+        refute_nil ShopifyLedger::Reconciliation.new(config).run(ALPHA)
+      ensure
+        File.chmod(original_mode, config_directory)
+      end
+    end
+  end
 end
