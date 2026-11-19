@@ -31,7 +31,8 @@ module ShopifyLedger
           # concurrent completions of one order queue instead of deadlocking.
           db.execute("SELECT id FROM inbox WHERE shop = ? AND order_id = ? AND id <= ? ORDER BY id FOR UPDATE",
                      [shop, order_id, fence])
-          next false unless db.get_first_value("SELECT processed FROM inbox WHERE id = ?", [id]) == 0
+          next false unless db.get_first_value("SELECT processed FROM inbox WHERE id = ? AND processed = 0 AND parked_at IS NULL",
+                                               [id]) == 0
 
           Payments.apply(db, shop, order_id, entries, source: "delivery:#{webhook_id}")
           now = Time.now.to_i
@@ -43,8 +44,12 @@ module ShopifyLedger
           before_commit&.call
           true
         end
-        after_commit&.call if applied
-        "processed"
+        if applied
+          after_commit&.call
+          "processed"
+        else
+          run_once(before_commit: before_commit, after_commit: after_commit)
+        end
       rescue Admin::Error, Payments::Error => error
         # A stale failure is dropped; take the next claim, as the SQLite worker does.
         defer(id, attempts, requeues, error) || run_once(before_commit: before_commit, after_commit: after_commit)

@@ -14,8 +14,9 @@ module ShopifyLedger
         puts JSON.generate(status: status)
         %w[retry parked].include?(status) ? 1 : 0
       in ["--drain"] if hooks.empty?
-        puts JSON.generate(worker.drain)
-        0
+        result = worker.drain
+        puts JSON.generate(result)
+        result["retry"] + result["parked"] > 0 ? 1 : 0
       in ["reconcile", String => shop]
         require_relative "../reconciliation"
         checkpoint = Reconciliation.new(worker_config = Config.load, store: Store.new(db)).run(shop)

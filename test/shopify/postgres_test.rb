@@ -148,6 +148,52 @@ class ShopifyPostgresTest < Minitest::Test
     end
   end
 
+  def test_parked_delivery_during_fetch_is_not_applied_on_postgres
+    ShopifyFixture.run do |run|
+      arrange_order(run, 1, "10.00")
+      receive("sale", 1)
+      run.admin.arrange(ALPHA, "OrderPayments", order_gid(1),
+                        { data: { order: { id: order_gid(1),
+                                           transactions: [ShopifyFixture.transaction("gid://shopify/OrderTransaction/1", "SALE", "10.00")],
+                                           transactionsCount: { count: 1, precision: "EXACT" } } } }) do
+        @db.execute("UPDATE inbox SET parked_at = ?, claimed_by = NULL, claimed_until = NULL WHERE webhook_id = ?",
+                    [Time.now.to_i, "sale"])
+      end
+
+      stdout, stderr, status = worker(run, "--once")
+      assert status.success?, stderr
+      assert_equal({ "status" => "idle" }, JSON.parse(stdout))
+      assert_equal [[0, 1]], @db.execute("SELECT processed, COUNT(*) FROM inbox GROUP BY processed")
+      assert_equal [[0]], @db.execute("SELECT COUNT(*) FROM transactions")
+    end
+  end
+
+  def test_concurrent_postgres_migrations_are_serialized
+    @db.execute("DROP TABLE IF EXISTS #{ShopifyLedger::Postgres::TABLES.join(', ')}")
+    ready = Queue.new
+    start = Queue.new
+    threads = Array.new(6) do
+      Thread.new do
+        db = ShopifyLedger::Postgres::Database.new(URL)
+        begin
+          ready << true
+          start.pop
+          db.migrate
+          nil
+        rescue StandardError => error
+          error
+        ensure
+          db&.close
+        end
+      end
+    end
+    6.times { ready.pop }
+    6.times { start << true }
+
+    failures = threads.map(&:value).compact
+    assert_empty failures.map { |error| "#{error.class}: #{error.message}" }
+  end
+
   def test_fixed_fuzz_seeds_keep_every_invariant_on_postgres
     report = ShopifyFuzz.campaign(seed: 20_261_119, runs: 25, steps: 200, backend: :postgres)
     assert_empty report["failures"], JSON.pretty_generate(report["failures"])
@@ -209,7 +255,9 @@ class ShopifyPostgresTest < Minitest::Test
       receive("sale", 1)
       run.admin.arrange(ALPHA, "OrderPayments", order_gid(2), { errors: [{ message: "down" }] }, code: 500)
       receive("broken", 2)
-      worker(run, "--drain")
+      drain_stdout, drain_stderr, drain_status = worker(run, "--drain")
+      assert_equal 1, drain_status.exitstatus, drain_stderr
+      assert_equal 1, JSON.parse(drain_stdout).fetch("retry")
       run.admin.page([order_gid(1)])
       stdout, = worker(run, "reconcile", ALPHA)
       refute_nil JSON.parse(stdout).fetch("synced_through")
