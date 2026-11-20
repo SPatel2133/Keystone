@@ -2,6 +2,10 @@
 
 A crash-safe Shopify payments ledger in Ruby, with SQLite and PostgreSQL backends.
 
+`bin/shopify-ops-demo`: order 102 is parked after two HTTP 503 failures and retried after the cause is fixed; reconciliation fails on page 2 and resumes there; `bin/shopify-audit` traces each transaction to its source.
+
+![Keystone ops demo](docs/demo.gif)
+
 The sequence-based consumer keeps a running balance correct when events arrive out of order, arrive twice, or commit just before the sender loses its acknowledgment.
 
 [![Verify Keystone](https://github.com/SPatel2133/keystone/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/SPatel2133/keystone/actions/workflows/verify.yml?query=branch%3Amain)
