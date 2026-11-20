@@ -384,4 +384,43 @@ class ShopifyShopRoutingTest < Minitest::Test
       end
     end
   end
+
+  def test_reconciliation_rejects_route_change_during_unlocked_read_only_run
+    skip "read-only directory test requires a non-root user" if Process.uid.zero?
+
+    ShopifyFixture.run do |run|
+      run.summary
+      eu = route(run)
+      config_directory = File.join(File.dirname(run.database), "readonly-route-config")
+      Dir.mkdir(config_directory)
+      config_path = File.join(config_directory, "config.json")
+      data = JSON.parse(File.read(File.join(File.dirname(run.database), "config.json")))
+      data["database"] = run.database
+      data["databases"] = { "main" => run.database, "eu" => eu }
+      data["shops"][ALPHA]["database"] = "main"
+      File.write(config_path, JSON.generate(data))
+      config = loaded_config(config_path)
+      lock_path = "#{config_path}.lock"
+      refute File.exist?(lock_path)
+      original_mode = File.stat(config_directory).mode & 0o7777
+      File.chmod(0o555, config_directory)
+
+      begin
+        run.admin.order([ShopifyFixture.transaction(SALE, "SALE", "100.00")])
+        run.admin.arrange(ALPHA, "ReconcileOrders", nil,
+                          { data: { orders: { nodes: [{ id: ORDER }], pageInfo: { hasNextPage: false, endCursor: nil } } } }) do
+          changed = JSON.parse(File.read(config_path))
+          changed["shops"][ALPHA]["database"] = "eu"
+          File.write(config_path, JSON.generate(changed))
+        end
+
+        error = assert_raises(ShopifyLedger::Admin::Error) do
+          ShopifyLedger::Reconciliation.new(config).run(ALPHA)
+        end
+        assert_equal "shop moved to another database during reconciliation; rerun reconcile", error.message
+      ensure
+        File.chmod(original_mode, config_directory)
+      end
+    end
+  end
 end

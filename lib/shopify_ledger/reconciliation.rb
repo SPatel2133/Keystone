@@ -35,10 +35,15 @@ module ShopifyLedger
 
       config_path = @config.path
       mode = File.stat(config_path).mode & 0o7777
-      with_config_lock(config_path, mode) do
+      with_config_lock(config_path, mode) do |locked|
         @config = Config.read(config_path)
-        @storage = Storage::Store.new(@config.database_for(shop))
-        run_with_storage(shop)
+        database = @config.database_for(shop)
+        @storage = Storage::Store.new(database)
+        checkpoint = run_with_storage(shop)
+        if !locked && Config.read(config_path).database_for(shop) != database
+          raise Admin::Error, "shop moved to another database during reconciliation; rerun reconcile"
+        end
+        checkpoint
       end
     end
 
@@ -58,11 +63,11 @@ module ShopifyLedger
         lock&.close
         lock = File.open(lock_path, File::RDONLY) if File.exist?(lock_path)
       end
-      return yield unless lock
+      return yield(false) unless lock
 
       begin
         lock.flock(File::LOCK_SH)
-        yield
+        yield(true)
       ensure
         lock.close
       end
