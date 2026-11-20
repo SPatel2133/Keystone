@@ -97,4 +97,22 @@ class ShopifyStatusTest < Minitest::Test
       end
     end
   end
+
+  def test_status_counts_over_refunded_orders_once_across_currencies
+    ShopifyFixture.run do |run|
+      run.admin.order([
+        ShopifyFixture.transaction("gid://shopify/OrderTransaction/301", "SALE", "10.00", "CAD"),
+        ShopifyFixture.transaction("gid://shopify/OrderTransaction/302", "REFUND", "11.00", "CAD"),
+        ShopifyFixture.transaction("gid://shopify/OrderTransaction/303", "SALE", "20.00", "USD"),
+        ShopifyFixture.transaction("gid://shopify/OrderTransaction/304", "REFUND", "21.00", "USD")
+      ])
+      run.with_endpoint { assert_equal 200, run.deliver("multi-currency-over-refund") }
+      run.worker
+
+      shops, = status(run, ALPHA)
+      assert_equal 1, shops.first.fetch("payments").fetch("orders_refunded_beyond_collected")
+      stdout, = run.command("bin/shopify-status", "--prometheus", ALPHA)
+      assert_includes stdout, 'shopify_ledger_payment_review{shop="alpha.myshopify.com",reason="refund_exceeds_payments"} 1'
+    end
+  end
 end

@@ -13,18 +13,25 @@ module ShopifyLedger
 
     DEFAULT_API_READ_TIMEOUT = 10
 
-    attr_reader :database, :secret, :max_attempts, :api_attempts, :api_read_timeout
+    attr_reader :database, :secret, :max_attempts, :api_attempts, :api_read_timeout, :path
 
     def self.load
-      path = File.expand_path(ENV.fetch("SHOPIFY_LEDGER_CONFIG"))
-      new(JSON.parse(File.read(path)), File.dirname(path))
+      read(ENV.fetch("SHOPIFY_LEDGER_CONFIG"))
     rescue KeyError, JSON::ParserError => error
       raise ArgumentError, "invalid Shopify ledger configuration (#{error.class})"
     end
 
-    def initialize(data, directory)
+    def self.read(path)
+      path = File.expand_path(path)
+      new(JSON.parse(File.read(path)), File.dirname(path), path: path)
+    rescue JSON::ParserError => error
+      raise ArgumentError, "invalid Shopify ledger configuration (#{error.class})"
+    end
+
+    def initialize(data, directory, path: nil)
       raise ArgumentError, "configuration must be a JSON object" unless data.is_a?(Hash)
 
+      @path = path&.freeze
       @database = File.expand_path(required_string(data, "database"), directory).freeze
       @secret = required_string(data, "secret").freeze
       @max_attempts = data.fetch("max_attempts", DEFAULT_MAX_ATTEMPTS)

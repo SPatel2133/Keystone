@@ -1,5 +1,7 @@
 require "json"
+require "securerandom"
 require "socket"
+require "uri"
 require_relative "admin"
 require_relative "config"
 require_relative "inbox"
@@ -93,6 +95,19 @@ module ShopifyLedger
     ].freeze
     TABLES = %w[inbox transactions payment_events checkpoints reconciliation_starts reconciliation_runs].freeze
 
+    def self.scratch_schema_name
+      "shopify_ledger_scratch_#{Process.pid}_#{SecureRandom.hex(4)}"
+    end
+
+    def self.scratch_url(url, schema)
+      raise ArgumentError, "invalid PostgreSQL schema" unless schema.match?(/\A[a-z_][a-z0-9_]*\z/i)
+
+      return "#{url} options='-csearch_path=#{schema}'" unless url.start_with?("postgres://", "postgresql://")
+
+      separator = URI.parse(url).query.to_s.empty? ? "?" : "&"
+      "#{url}#{separator}options=-csearch_path%3D#{schema}"
+    end
+
     def self.load_driver
       require "pg"
     rescue LoadError
@@ -120,7 +135,10 @@ module ShopifyLedger
       def reset = @connection.reset
 
       def migrate
-        SCHEMA.each { |statement| @connection.exec(statement) }
+        @connection.transaction do
+          @connection.exec("SELECT pg_advisory_xact_lock(7243105118)")
+          SCHEMA.each { |statement| @connection.exec(statement) }
+        end
         self
       end
     end

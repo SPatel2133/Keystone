@@ -1,5 +1,6 @@
 require "minitest/autorun"
 require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/reconciliation"
 require_relative "../support/shopify_scenarios"
 
 class ShopifyResumableReconciliationTest < Minitest::Test
@@ -64,6 +65,25 @@ class ShopifyResumableReconciliationTest < Minitest::Test
     end
   end
 
+  def test_resume_failure_preserves_progress_advanced_by_another_reconciler
+    ShopifyFixture.run do |run|
+      arrange_three_pages(run)
+      run.admin.arrange(ALPHA, "ReconcileOrders", "page-3", OUTAGE, code: 503)
+      run.reconcile(success: false)
+      advanced = false
+      run.admin.arrange(ALPHA, "ReconcileOrders", "page-3", OUTAGE, code: 503) do
+        unless advanced
+          advanced = true
+          run.read("UPDATE reconciliation_runs SET pages = 3, cursor = ? WHERE id = 1", ["page-4"])
+        end
+      end
+
+      run.reconcile(success: false)
+
+      assert_equal [["failed", 3, "page-4"]], run.read("SELECT status, pages, cursor FROM reconciliation_runs")
+    end
+  end
+
   def test_killed_reconciler_leaves_a_running_window_that_the_next_run_resumes
     ShopifyFixture.run do |run|
       arrange_three_pages(run)
@@ -92,5 +112,41 @@ class ShopifyResumableReconciliationTest < Minitest::Test
       assert_equal [["completed", 3, 3, nil, 2], ["completed", 3, 3, nil, 1]], runs(run)
       assert_equal "82.50", run.summary.fetch("totals").first.fetch("net")
     end
+  end
+
+  def test_final_page_progress_resumes_without_refetching_orders
+    ShopifyFixture.run do |run|
+      run.admin.page([])
+      config = config_for(run)
+      reconciliation = ShopifyLedger::Reconciliation.new(config)
+      save_progress = reconciliation.method(:save_progress)
+      reconciliation.stub(:save_progress, lambda { |*arguments|
+        save_progress.call(*arguments)
+        raise "interrupted after page progress"
+      }) do
+        assert_raises(RuntimeError) { reconciliation.run(ALPHA) }
+      end
+      assert_equal [["failed", 1, nil]], run.read("SELECT status, pages, cursor FROM reconciliation_runs")
+
+      requests_before_resume = run.admin.requests.count { |request| request["operation"] == "ReconcileOrders" }
+      resumed = reconciliation.send(:open_run, ALPHA)
+      checkpoint = reconciliation.send(:finish, ShopifyLedger::Admin.new(config, ALPHA), ALPHA, resumed)
+
+      assert_equal requests_before_resume,
+                   run.admin.requests.count { |request| request["operation"] == "ReconcileOrders" }
+      assert_equal [["completed", 1, nil]], run.read("SELECT status, pages, cursor FROM reconciliation_runs")
+      assert_equal [[ALPHA, checkpoint]], run.snapshot.fetch("checkpoints")
+    end
+  end
+
+  private
+
+  def config_for(run)
+    previous_http_setting = ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"]
+    ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
+    path = run.instance_variable_get(:@config_path)
+    ShopifyLedger::Config.new(JSON.parse(File.read(path)), File.dirname(path))
+  ensure
+    previous_http_setting ? ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = previous_http_setting : ENV.delete("SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK")
   end
 end

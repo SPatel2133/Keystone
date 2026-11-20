@@ -1,5 +1,6 @@
 require "minitest/autorun"
 require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/reconciliation"
 require_relative "../support/shopify_fixture"
 require_relative "../support/shopify_fuzz"
 
@@ -44,6 +45,38 @@ class ShopifyPostgresTest < Minitest::Test
     stdout, stderr, status = worker(run, "summary", ALPHA)
     assert status.success?, stderr
     JSON.parse(stdout).fetch("totals").fetch(0).fetch("net")
+  end
+
+  def test_scratch_url_appends_search_path_with_or_without_existing_query
+    assert_equal "postgres://user:pass@localhost/ledger?options=-csearch_path%3Dscratch",
+                 ShopifyLedger::Postgres.scratch_url("postgres://user:pass@localhost/ledger", "scratch")
+    assert_equal "postgres://user:pass@localhost/ledger?sslmode=require&options=-csearch_path%3Dscratch",
+                 ShopifyLedger::Postgres.scratch_url("postgres://user:pass@localhost/ledger?sslmode=require", "scratch")
+    assert_equal "host=db dbname=ledger options='-csearch_path=scratch'",
+                 ShopifyLedger::Postgres.scratch_url("host=db dbname=ledger", "scratch")
+  end
+
+  def test_scratch_schema_names_include_process_and_random_suffix
+    names = Array.new(2) { ShopifyLedger::Postgres.scratch_schema_name }
+
+    assert_equal 2, names.uniq.size
+    names.each { |name| assert_match(/\Ashopify_ledger_scratch_#{Process.pid}_[0-9a-f]{8}\z/, name) }
+  end
+
+  def test_postgres_fuzz_uses_a_scratch_schema_without_touching_public_rows
+    @db.execute("CREATE TABLE public.keep_me (value TEXT PRIMARY KEY)")
+    @db.execute("INSERT INTO public.keep_me VALUES ('keep')")
+    @db.execute("INSERT INTO public.inbox (shop, webhook_id, topic, order_id, received_at) VALUES (?, ?, ?, ?, ?)",
+                [ALPHA, "public-marker", "orders/updated", ORDER, Time.now.to_i])
+
+    report = ShopifyFuzz.campaign(seed: 1000, runs: 1, steps: 1, backend: :postgres)
+    assert_empty report["failures"], JSON.pretty_generate(report["failures"])
+    assert_equal [["keep"]], @db.execute("SELECT value FROM public.keep_me")
+    assert_equal [["public-marker"]], @db.execute("SELECT webhook_id FROM public.inbox WHERE shop = ? AND webhook_id = ?",
+                                                  [ALPHA, "public-marker"])
+  ensure
+    @db&.execute("DELETE FROM public.inbox WHERE shop = ? AND webhook_id = ?", [ALPHA, "public-marker"])
+    @db&.execute("DROP TABLE IF EXISTS public.keep_me")
   end
 
   def test_workers_on_four_machines_fetch_each_delivery_once_with_skip_locked
@@ -124,6 +157,52 @@ class ShopifyPostgresTest < Minitest::Test
     end
   end
 
+  def test_parked_delivery_during_fetch_is_not_applied_on_postgres
+    ShopifyFixture.run do |run|
+      arrange_order(run, 1, "10.00")
+      receive("sale", 1)
+      run.admin.arrange(ALPHA, "OrderPayments", order_gid(1),
+                        { data: { order: { id: order_gid(1),
+                                           transactions: [ShopifyFixture.transaction("gid://shopify/OrderTransaction/1", "SALE", "10.00")],
+                                           transactionsCount: { count: 1, precision: "EXACT" } } } }) do
+        @db.execute("UPDATE inbox SET parked_at = ?, claimed_by = NULL, claimed_until = NULL WHERE webhook_id = ?",
+                    [Time.now.to_i, "sale"])
+      end
+
+      stdout, stderr, status = worker(run, "--once")
+      assert status.success?, stderr
+      assert_equal({ "status" => "idle" }, JSON.parse(stdout))
+      assert_equal [[0, 1]], @db.execute("SELECT processed, COUNT(*) FROM inbox GROUP BY processed")
+      assert_equal [[0]], @db.execute("SELECT COUNT(*) FROM transactions")
+    end
+  end
+
+  def test_concurrent_postgres_migrations_are_serialized
+    @db.execute("DROP TABLE IF EXISTS #{ShopifyLedger::Postgres::TABLES.join(', ')}")
+    ready = Queue.new
+    start = Queue.new
+    threads = Array.new(6) do
+      Thread.new do
+        db = ShopifyLedger::Postgres::Database.new(URL)
+        begin
+          ready << true
+          start.pop
+          db.migrate
+          nil
+        rescue StandardError => error
+          error
+        ensure
+          db&.close
+        end
+      end
+    end
+    6.times { ready.pop }
+    6.times { start << true }
+
+    failures = threads.map(&:value).compact
+    assert_empty failures.map { |error| "#{error.class}: #{error.message}" }
+  end
+
   def test_fixed_fuzz_seeds_keep_every_invariant_on_postgres
     report = ShopifyFuzz.campaign(seed: 20_261_119, runs: 25, steps: 200, backend: :postgres)
     assert_empty report["failures"], JSON.pretty_generate(report["failures"])
@@ -185,7 +264,9 @@ class ShopifyPostgresTest < Minitest::Test
       receive("sale", 1)
       run.admin.arrange(ALPHA, "OrderPayments", order_gid(2), { errors: [{ message: "down" }] }, code: 500)
       receive("broken", 2)
-      worker(run, "--drain")
+      drain_stdout, drain_stderr, drain_status = worker(run, "--drain")
+      assert_equal 1, drain_status.exitstatus, drain_stderr
+      assert_equal 1, JSON.parse(drain_stdout).fetch("retry")
       run.admin.page([order_gid(1)])
       stdout, = worker(run, "reconcile", ALPHA)
       refute_nil JSON.parse(stdout).fetch("synced_through")
@@ -302,22 +383,57 @@ class ShopifyPostgresTest < Minitest::Test
   # failure that began before an operator retry parked the requeued delivery.
   def test_operator_retry_during_a_failing_fetch_is_not_overwritten_on_postgres
     ShopifyFixture.run do |run|
-      run.configure(max_attempts: 2)
+      run.configure(max_attempts: 1)
       down = { errors: [{ message: "down" }] }
-      run.admin.arrange(ALPHA, "OrderPayments", order_gid(1), down, code: 500)
       receive("sale", 1)
-      worker(run, "--once")
-      @db.execute("UPDATE inbox SET next_attempt_at = 0")
       retried = false
       run.admin.arrange(ALPHA, "OrderPayments", order_gid(1), down, code: 500) do
         unless retried
           retried = true
           worker(run, "deliveries", "retry", ALPHA, "sale")
+          arrange_order(run, 1, "10.00")
         end
       end
-      stdout, = worker(run, "--once")
-      assert_equal({ "status" => "retry" }, JSON.parse(stdout))
-      assert_equal [[0, nil, 1, 1]], @db.execute("SELECT processed, parked_at, attempts, requeues FROM inbox")
+      stdout, stderr, status = worker(run, "--once")
+      assert_equal 0, status.exitstatus, stderr
+      assert_equal({ "status" => "processed" }, JSON.parse(stdout))
+      assert_equal [[1, nil, 0, 1]], @db.execute("SELECT processed, parked_at, attempts, requeues FROM inbox")
     end
+  end
+
+  def test_concurrent_first_reconciliation_run_retries_a_competing_insert
+    previous_http_setting = ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"]
+    ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
+    ShopifyFixture.run do |run|
+      run.admin.page([])
+      config_path = run.instance_variable_get(:@config_path)
+      config = ShopifyLedger::Config.new(JSON.parse(File.read(config_path)), File.dirname(config_path))
+      now = Time.now.utc
+      clock = -> { now }
+      window_start = (now - 7 * 24 * 60 * 60).iso8601
+      window_end = (now + 60).iso8601
+      other = ShopifyLedger::Postgres::Database.new(URL)
+      reconciliation = ShopifyLedger::Reconciliation.new(config, clock: clock, store: ShopifyLedger::Postgres::Store.new(@db))
+      read_checkpoint = reconciliation.method(:read_checkpoint)
+      inserted = false
+      reconciliation.stub(:read_checkpoint, lambda { |db, shop|
+        checkpoint = read_checkpoint.call(db, shop)
+        unless inserted
+          inserted = true
+          other.execute(<<~SQL, [ALPHA, window_start, window_end, now.to_i, now.to_i])
+            INSERT INTO reconciliation_runs (shop, window_start, window_end, status, started_at, updated_at)
+            VALUES (?, ?, ?, 'running', ?, ?)
+          SQL
+        end
+        checkpoint
+      }) do
+        assert_equal window_end, reconciliation.run(ALPHA)
+      end
+      assert_equal [["completed", 1, nil]], @db.execute("SELECT status, pages, cursor FROM reconciliation_runs")
+    ensure
+      other&.close
+    end
+  ensure
+    previous_http_setting ? ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = previous_http_setting : ENV.delete("SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK")
   end
 end

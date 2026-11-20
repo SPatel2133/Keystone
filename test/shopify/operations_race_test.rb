@@ -1,6 +1,37 @@
 require "minitest/autorun"
+require "delegate"
 require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/deliveries"
+require_relative "../../lib/shopify_ledger/storage"
 require_relative "../support/shopify_scenarios"
+
+class StaleProcessedDatabase < SimpleDelegator
+  def get_first_row(statement, parameters = [])
+    row = super
+    if !@stale_read && statement.include?("FROM inbox") && row
+      @stale_read = true
+      row = row.dup
+      row[4] = 0
+    end
+    row
+  end
+end
+
+class StaleProcessedStore
+  def initialize(path)
+    @path = path
+  end
+
+  def connect
+    SQLite3::Database.new(@path) do |db|
+      yield StaleProcessedDatabase.new(db)
+    end
+  end
+
+  def transaction(db, &block)
+    ShopifyLedger::Storage.transaction(db, &block)
+  end
+end
 
 class ShopifyOperationsRaceTest < Minitest::Test
   include ShopifyFixture
@@ -52,6 +83,17 @@ class ShopifyOperationsRaceTest < Minitest::Test
       # the operator just requeued.
       assert_equal({ "status" => "retry" }, run.worker(success: false))
       assert_equal [[0, nil, 1, 1]], run.read("SELECT processed, parked_at, attempts, requeues FROM inbox")
+    end
+  end
+
+  def test_delivery_retry_refuses_a_row_that_became_processed_after_read
+    ShopifyFixture.run do |run|
+      run.with_endpoint { assert_equal 200, run.deliver("finished") }
+      run.read("UPDATE inbox SET processed = 1 WHERE webhook_id = ?", ["finished"])
+      deliveries = ShopifyLedger::Deliveries.new(nil, store: StaleProcessedStore.new(run.database))
+
+      error = assert_raises(ShopifyLedger::Deliveries::Refused) { deliveries.retry(ALPHA, "finished") }
+      assert_equal "delivery already processed", error.message
     end
   end
 end

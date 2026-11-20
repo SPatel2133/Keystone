@@ -21,23 +21,30 @@ module ShopifyLedger
     IDENTITY = "id".freeze
 
     def self.run(config_path, shop, to, after_copy: nil, after_switch: nil)
-      config = Config.new(JSON.parse(File.read(config_path)), File.dirname(config_path))
-      raise Refused, "shop is not configured" unless config.shop?(shop)
+      config_path = File.expand_path(config_path)
+      mode = File.stat(config_path).mode & 0o7777
+      lock_path = "#{config_path}.lock"
+      File.open(lock_path, File::RDWR | File::CREAT, mode) do |lock|
+        File.chmod(mode, lock_path)
+        lock.flock(File::LOCK_EX)
+        config = Config.read(config_path)
+        raise Refused, "shop is not configured" unless config.shop?(shop)
 
-      destination = config.database_named(to)
-      source = config.database_for(shop)
-      copied = nil
-      if source != destination
-        Storage.new(destination).connect { nil }
-        copied = copy(source, destination, shop)
-        after_copy&.call
-        switch(config_path, shop, to)
-        after_switch&.call
+        destination = config.database_named(to)
+        source = config.database_for(shop)
+        copied = nil
+        if source != destination
+          Storage.new(destination).connect { nil }
+          copied = copy(source, destination, shop)
+          after_copy&.call
+          switch(config_path, shop, to)
+          after_switch&.call
+        end
+        removed = (config.all_databases - [destination]).to_h { |path| [path, clean(path, destination, shop)] }
+        totals = Storage.new(destination).connect { |db| Payments.summary(db, shop) }
+        { shop: shop, to: to, database: destination, copied: copied, removed: removed.reject { |_, count| count.zero? },
+          totals: totals }.compact
       end
-      removed = (config.all_databases - [destination]).to_h { |path| [path, clean(path, destination, shop)] }
-      totals = Storage.new(destination).connect { |db| Payments.summary(db, shop) }
-      { shop: shop, to: to, database: destination, copied: copied, removed: removed.reject { |_, count| count.zero? },
-        totals: totals }.compact
     end
 
     def self.cli(arguments, **hooks)
@@ -74,6 +81,14 @@ module ShopifyLedger
           TABLES.to_h do |table|
             list = columns(db, "main", table).join(", ")
             ordered = columns(db, "main", table).size < db.execute("PRAGMA main.table_info(#{table})").size ? " ORDER BY id" : ""
+            if (key = KEYS[table])
+              missing = db.get_first_value(<<~SQL, [shop, shop])
+                SELECT COUNT(*) FROM other.#{table}
+                WHERE shop = ? AND #{key} NOT IN (SELECT #{key} FROM main.#{table} WHERE shop = ?)
+              SQL
+              raise Refused, "#{destination} has #{missing} #{table} rows for #{shop} that the source lacks; reconcile them by hand" if missing.positive?
+            end
+
             # Rows left by an earlier attempt that crashed before switching.
             db.execute("DELETE FROM other.#{table} WHERE shop = ?", [shop])
             db.execute("INSERT INTO other.#{table} (#{list}) SELECT #{list} FROM main.#{table} WHERE shop = ?#{ordered}", [shop])
@@ -88,13 +103,21 @@ module ShopifyLedger
 
     def self.switch(config_path, shop, to)
       data = JSON.parse(File.read(config_path))
+      stat = File.stat(config_path)
+      mode = stat.mode & 0o7777
       data.fetch("shops").fetch(shop)["database"] = to
       temporary = "#{config_path}.move-#{Process.pid}"
-      File.open(temporary, "w", 0o600) do |file|
+      File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
         file.write(JSON.pretty_generate(data))
         file.flush
         file.fsync
       end
+      begin
+        File.chown(stat.uid, stat.gid, temporary)
+      rescue Errno::EPERM
+        nil
+      end
+      File.chmod(mode, temporary)
       File.rename(temporary, config_path)
     end
 

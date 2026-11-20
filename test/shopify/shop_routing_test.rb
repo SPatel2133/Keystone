@@ -1,9 +1,25 @@
 require "minitest/autorun"
 require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/config"
+require_relative "../../lib/shopify_ledger/move_shop"
+require_relative "../../lib/shopify_ledger/reconciliation"
 require_relative "../support/shopify_fixture"
 
 class ShopifyShopRoutingTest < Minitest::Test
   include ShopifyFixture
+
+  def setup
+    @previous_allow_http_loopback = ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"]
+    ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
+  end
+
+  def teardown
+    if @previous_allow_http_loopback
+      ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = @previous_allow_http_loopback
+    else
+      ENV.delete("SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK")
+    end
+  end
 
   def route(run, routes = {})
     path = File.join(File.dirname(run.database), "config.json")
@@ -15,6 +31,14 @@ class ShopifyShopRoutingTest < Minitest::Test
   end
 
   def config(run) = JSON.parse(File.read(File.join(File.dirname(run.database), "config.json")))
+
+  def loaded_config(path)
+    previous = ENV["SHOPIFY_LEDGER_CONFIG"]
+    ENV["SHOPIFY_LEDGER_CONFIG"] = path
+    ShopifyLedger::Config.load
+  ensure
+    previous ? ENV["SHOPIFY_LEDGER_CONFIG"] = previous : ENV.delete("SHOPIFY_LEDGER_CONFIG")
+  end
 
   def read(path, sql)
     SQLite3::Database.new(path) { |db| return db.execute(sql) }
@@ -207,6 +231,196 @@ class ShopifyShopRoutingTest < Minitest::Test
       _stdout, stderr, status = run.command("bin/shopify-summary", ALPHA)
       refute status.success?
       assert_match(/unknown database/, stderr)
+    end
+  end
+
+  def test_reconciliation_uses_the_new_route_from_a_pre_move_config_object
+    ShopifyFixture.run do |run|
+      run.summary
+      eu = route(run)
+      config_path = File.join(File.dirname(run.database), "config.json")
+      old_config = loaded_config(config_path)
+      repair_order = "gid://shopify/Order/103"
+      run.admin.order([ShopifyFixture.transaction("gid://shopify/OrderTransaction/303", "SALE", "15.00")],
+                      id: repair_order)
+      run.admin.page([repair_order])
+
+      assert_equal 0, ShopifyLedger::MoveShop.run(config_path, ALPHA, "eu").fetch(:copied).fetch("inbox")
+      refute_nil ShopifyLedger::Reconciliation.new(old_config).run(ALPHA)
+      assert_equal [[1]], read(eu, "SELECT COUNT(*) FROM transactions WHERE order_id = '#{repair_order}'")
+      assert_equal [[0]], read(run.database, "SELECT COUNT(*) FROM transactions WHERE order_id = '#{repair_order}'")
+    end
+  end
+
+  def test_move_waits_for_a_shared_reconciliation_lock
+    ShopifyFixture.run do |run|
+      run.summary
+      route(run)
+      config_path = File.join(File.dirname(run.database), "config.json")
+      lock_path = "#{config_path}.lock"
+      File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+        lock.flock(File::LOCK_SH)
+        move_thread = Thread.new { ShopifyLedger::MoveShop.run(config_path, ALPHA, "eu") }
+        begin
+          assert_nil move_thread.join(0.2)
+        ensure
+          lock.flock(File::LOCK_UN)
+        end
+        assert move_thread.value
+      end
+    end
+  end
+
+  def test_concurrent_moves_serialize_and_preserve_the_second_destination
+    ShopifyFixture.run do |run|
+      seed(run)
+      eu = route(run)
+      config_path = File.join(File.dirname(run.database), "config.json")
+      data = config(run)
+      data["databases"]["us"] = "us.sqlite3"
+      File.write(config_path, JSON.generate(data))
+      us = File.join(File.dirname(run.database), "us.sqlite3")
+      before = counts(run.database)
+      copied = Queue.new
+      continue = Queue.new
+      first = Thread.new do
+        ShopifyLedger::MoveShop.run(config_path, ALPHA, "eu", after_copy: -> { copied << true; continue.pop })
+      end
+      copied.pop
+      second_started = Queue.new
+      second = Thread.new do
+        second_started << true
+        ShopifyLedger::MoveShop.run(config_path, ALPHA, "us")
+      end
+      second_started.pop
+      sleep 0.1
+      continue << true
+      first.value
+      second.value
+
+      assert_equal "us", config(run).fetch("shops").fetch(ALPHA).fetch("database")
+      assert_equal before, counts(us)
+      assert_equal [0, 0, 0, 0, 0], counts(run.database)
+      assert_equal [0, 0, 0, 0, 0], counts(eu)
+    end
+  end
+
+  def test_move_back_refuses_to_delete_rows_preserved_by_cleanup
+    ShopifyFixture.run do |run|
+      seed(run)
+      route(run)
+      config_path = File.join(File.dirname(run.database), "config.json")
+      ShopifyLedger::MoveShop.run(config_path, ALPHA, "eu")
+      SQLite3::Database.new(run.database) do |db|
+        db.execute("INSERT INTO inbox (shop, webhook_id, topic, order_id, received_at) VALUES (?, ?, ?, ?, ?)",
+                   [ALPHA, "preserved", "orders/updated", ORDER, 0])
+      end
+
+      error = assert_raises(ShopifyLedger::MoveShop::Refused) do
+        ShopifyLedger::MoveShop.run(config_path, ALPHA, "main")
+      end
+      assert_match(/has 1 inbox rows for #{Regexp.escape(ALPHA)} that the source lacks; reconcile them by hand/, error.message)
+      assert_equal 1, read(run.database, "SELECT COUNT(*) FROM inbox WHERE webhook_id = 'preserved'").first.first
+    end
+  end
+
+  def test_move_preserves_config_permissions
+    ShopifyFixture.run do |run|
+      seed(run)
+      route(run)
+      config_path = File.join(File.dirname(run.database), "config.json")
+      File.chmod(0o640, config_path)
+
+      assert_equal 0, move(run).last.exitstatus
+      assert_equal 0o640, File.stat(config_path).mode & 0o7777
+    end
+  end
+
+  def test_move_keeps_temporary_config_private_during_chown
+    ShopifyFixture.run do |run|
+      route(run)
+      config_path = File.join(File.dirname(run.database), "config.json")
+      File.chmod(0o640, config_path)
+      temporary_mode = nil
+
+      File.stub(:chown, ->(_uid, _gid, temporary) { temporary_mode = File.stat(temporary).mode & 0o7777 }) do
+        ShopifyLedger::MoveShop.switch(config_path, ALPHA, "eu")
+      end
+
+      assert_equal 0o600, temporary_mode
+      assert_equal 0o640, File.stat(config_path).mode & 0o7777
+    end
+  end
+
+  def test_reconciliation_succeeds_with_read_only_config_directory
+    skip "read-only directory test requires a non-root user" if Process.uid.zero?
+
+    ShopifyFixture.run do |run|
+      run.summary
+      run.admin.order([ShopifyFixture.transaction(SALE, "SALE", "100.00")])
+      run.admin.page([ORDER])
+      config_directory = File.join(File.dirname(run.database), "readonly-config")
+      Dir.mkdir(config_directory)
+      config_path = File.join(config_directory, "config.json")
+      data = JSON.parse(File.read(File.join(File.dirname(run.database), "config.json")))
+      data["database"] = run.database
+      File.write(config_path, JSON.generate(data))
+      config = loaded_config(config_path)
+      lock_path = "#{config_path}.lock"
+      File.write(lock_path, "")
+      File.chmod(0o444, lock_path)
+      original_mode = File.stat(config_directory).mode & 0o7777
+      File.chmod(0o555, config_directory)
+
+      begin
+        refute_nil ShopifyLedger::Reconciliation.new(config).run(ALPHA)
+
+        File.chmod(original_mode, config_directory)
+        File.unlink(lock_path)
+        File.chmod(0o555, config_directory)
+        refute_nil ShopifyLedger::Reconciliation.new(config).run(ALPHA)
+      ensure
+        File.chmod(original_mode, config_directory)
+      end
+    end
+  end
+
+  def test_reconciliation_rejects_route_change_during_unlocked_read_only_run
+    skip "read-only directory test requires a non-root user" if Process.uid.zero?
+
+    ShopifyFixture.run do |run|
+      run.summary
+      eu = route(run)
+      config_directory = File.join(File.dirname(run.database), "readonly-route-config")
+      Dir.mkdir(config_directory)
+      config_path = File.join(config_directory, "config.json")
+      data = JSON.parse(File.read(File.join(File.dirname(run.database), "config.json")))
+      data["database"] = run.database
+      data["databases"] = { "main" => run.database, "eu" => eu }
+      data["shops"][ALPHA]["database"] = "main"
+      File.write(config_path, JSON.generate(data))
+      config = loaded_config(config_path)
+      lock_path = "#{config_path}.lock"
+      refute File.exist?(lock_path)
+      original_mode = File.stat(config_directory).mode & 0o7777
+      File.chmod(0o555, config_directory)
+
+      begin
+        run.admin.order([ShopifyFixture.transaction(SALE, "SALE", "100.00")])
+        run.admin.arrange(ALPHA, "ReconcileOrders", nil,
+                          { data: { orders: { nodes: [{ id: ORDER }], pageInfo: { hasNextPage: false, endCursor: nil } } } }) do
+          changed = JSON.parse(File.read(config_path))
+          changed["shops"][ALPHA]["database"] = "eu"
+          File.write(config_path, JSON.generate(changed))
+        end
+
+        error = assert_raises(ShopifyLedger::Admin::Error) do
+          ShopifyLedger::Reconciliation.new(config).run(ALPHA)
+        end
+        assert_equal "shop moved to another database during reconciliation; rerun reconcile", error.message
+      ensure
+        File.chmod(original_mode, config_directory)
+      end
     end
   end
 end

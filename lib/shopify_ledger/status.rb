@@ -136,7 +136,7 @@ module ShopifyLedger
     def payments(db, shop)
       review = Payments.review(db, shop)
       { open_transactions: review[:open_transactions],
-        orders_refunded_beyond_collected: review[:refunds_exceeding_collected].size,
+        orders_refunded_beyond_collected: review[:refunds_exceeding_collected].map { |row| row[:order_id] }.uniq.size,
         authorizations_captured_beyond_amount: review[:captures_exceeding_authorization].size }
     end
 

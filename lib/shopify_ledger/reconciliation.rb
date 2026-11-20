@@ -31,18 +31,60 @@ module ShopifyLedger
     # Returns the shop's checkpoint after finishing any interrupted window and
     # then one fresh window ending now.
     def run(shop)
+      return run_with_storage(shop) if @store || !@config.path
+
+      config_path = @config.path
+      mode = File.stat(config_path).mode & 0o7777
+      with_config_lock(config_path, mode) do |locked|
+        @config = Config.read(config_path)
+        database = @config.database_for(shop)
+        @storage = Storage::Store.new(database)
+        checkpoint = run_with_storage(shop)
+        if !locked && Config.read(config_path).database_for(shop) != database
+          raise Admin::Error, "shop moved to another database during reconciliation; rerun reconcile"
+        end
+        checkpoint
+      end
+    end
+
+    private
+
+    def with_config_lock(config_path, mode)
+      lock_path = "#{config_path}.lock"
+      lock = nil
+      begin
+        lock = File.open(lock_path, File::RDWR | File::CREAT, mode)
+        begin
+          File.chmod(mode, lock_path)
+        rescue Errno::EPERM
+          nil
+        end
+      rescue Errno::EACCES, Errno::EROFS
+        lock&.close
+        lock = File.open(lock_path, File::RDONLY) if File.exist?(lock_path)
+      end
+      return yield(false) unless lock
+
+      begin
+        lock.flock(File::LOCK_SH)
+        yield(true)
+      ensure
+        lock.close
+      end
+    end
+
+    def run_with_storage(shop)
       @storage = @store || Storage::Store.new(@config.database_for(shop))
       admin = Admin.new(@config, shop)
       loop do
         run = open_run(shop)
+        next if run == :retry
         return run if run.is_a?(String)
 
         checkpoint = finish(admin, shop, run)
         return checkpoint unless run.resumed
       end
     end
-
-    private
 
     def open_run(shop)
       upper = @clock.call.getutc
@@ -74,8 +116,11 @@ module ShopifyLedger
           row = db.get_first_row(<<~SQL, [shop, lower.utc.iso8601, upper.iso8601, now, now])
             INSERT INTO reconciliation_runs (shop, window_start, window_end, status, started_at, updated_at)
             VALUES (?, ?, ?, 'running', ?, ?)
+            ON CONFLICT DO NOTHING
             RETURNING id, window_start, window_end, cursor, pages
           SQL
+          next :retry unless row
+
           build(row, resumed: false)
         end
       end
@@ -90,7 +135,7 @@ module ShopifyLedger
       filter = "updated_at:>='#{run.window_start}' updated_at:<='#{run.window_end}'"
       Log.event("reconciliation_started", shop: shop, run: run.id, window_start: run.window_start,
                                           window_end: run.window_end, resumed_after_pages: run.resumed ? run.pages : nil)
-      reconcile_orders(admin, shop, filter, run)
+      reconcile_orders(admin, shop, filter, run) unless run.resumed && run.cursor.nil? && run.pages.positive?
       checkpoint = complete(shop, run)
       Log.event("reconciliation_completed", shop: shop, run: run.id, synced_through: checkpoint)
       checkpoint
@@ -148,11 +193,11 @@ module ShopifyLedger
       restart = @first_request_of_resume
       @storage.connect do |db|
         @storage.transaction(db) do
-          db.execute(<<~SQL, [error.message, Time.now.to_i, restart ? 1 : 0, restart ? 1 : 0, run.id])
+          db.execute(<<~SQL, [error.message, Time.now.to_i, restart ? 1 : 0, run.pages, restart ? 1 : 0, run.pages, run.id])
             UPDATE reconciliation_runs
             SET status = 'failed', last_error = ?, updated_at = ?,
-                cursor = CASE WHEN ? THEN NULL ELSE cursor END,
-                pages = CASE WHEN ? THEN 0 ELSE pages END
+                cursor = CASE WHEN ? AND pages = ? THEN NULL ELSE cursor END,
+                pages = CASE WHEN ? AND pages = ? THEN 0 ELSE pages END
             WHERE id = ? AND status <> 'completed'
           SQL
         end

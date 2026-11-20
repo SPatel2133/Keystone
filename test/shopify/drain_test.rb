@@ -1,5 +1,6 @@
 require "minitest/autorun"
 require_relative "../../lib/event_consumer/bundle"
+require_relative "../../lib/shopify_ledger/worker"
 require_relative "../support/shopify_scenarios"
 
 class ShopifyDrainTest < Minitest::Test
@@ -62,6 +63,82 @@ class ShopifyDrainTest < Minitest::Test
       assert_equal({ "processed" => 0, "retry" => 0, "parked" => 0, "status" => "idle" },
                    run.json("bin/shopify-worker", "--drain"))
     end
+  end
+
+  def test_stale_failure_does_not_park_a_requeued_delivery
+    ShopifyFixture.run do |run|
+      run.configure(max_attempts: 1)
+      run.admin.arrange(ALPHA, "OrderPayments", order(1000), { errors: [{ message: "down" }] }, code: 500)
+      run.with_endpoint { assert_equal 200, run.deliver("stale-failure", payload: { id: 1000, admin_graphql_api_id: order(1000) }) }
+      requeued = false
+      run.admin.arrange(ALPHA, "OrderPayments", order(1000), { errors: [{ message: "down" }] }, code: 500) do
+        unless requeued
+          requeued = true
+          run.json("bin/shopify-deliveries", "retry", ALPHA, "stale-failure")
+          run.admin.order([ShopifyFixture.transaction("gid://shopify/OrderTransaction/1000", "SALE", "1000.00")],
+                          id: order(1000))
+        end
+      end
+
+      stdout, stderr, status = run.command("bin/shopify-worker", "--once")
+      assert_equal 0, status.exitstatus, stderr
+      assert_equal({ "status" => "processed" }, JSON.parse(stdout))
+      assert_equal [[1, nil, 0, 1]], run.read("SELECT processed, parked_at, attempts, requeues FROM inbox")
+    end
+  end
+
+  def test_busy_payment_write_does_not_consume_an_attempt
+    previous_http_setting = ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"]
+    ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
+    ShopifyFixture.run do |run|
+      run.configure(max_attempts: 1)
+      run.admin.order([ShopifyFixture.transaction("gid://shopify/OrderTransaction/1000", "SALE", "1000.00")],
+                      id: order(1000))
+      run.with_endpoint { assert_equal 200, run.deliver("busy-write", payload: { id: 1000, admin_graphql_api_id: order(1000) }) }
+      config_path = run.instance_variable_get(:@config_path)
+      config = ShopifyLedger::Config.new(JSON.parse(File.read(config_path)), File.dirname(config_path))
+      worker = ShopifyLedger::Worker.new(config)
+      original_apply = ShopifyLedger::Payments.method(:apply)
+      calls = 0
+      busy_once = lambda do |*arguments, **keywords|
+        calls += 1
+        raise SQLite3::BusyException, "synthetic lock contention" if calls == 1
+
+        original_apply.call(*arguments, **keywords)
+      end
+
+      ShopifyLedger::Payments.stub(:apply, busy_once) do
+        assert_equal "retry", worker.run_once
+      end
+      row = run.read("SELECT processed, attempts, parked_at, last_error, next_attempt_at, last_attempt_at, claimed_by FROM inbox").first
+      assert_equal [0, 0, nil, "synthetic lock contention"], row.first(4)
+      assert_operator row[4], :>, Time.now.to_i
+      refute_nil row[5]
+      assert_nil row[6]
+
+      run.read("UPDATE inbox SET next_attempt_at = 0")
+      assert_equal({ "processed" => 1, "retry" => 0, "parked" => 0, "status" => "idle" }, worker.drain)
+      assert_equal [[1, 0]], run.read("SELECT processed, attempts FROM inbox")
+    end
+  ensure
+    previous_http_setting ? ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = previous_http_setting : ENV.delete("SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK")
+  end
+
+  def test_drain_stops_after_the_requested_outcome
+    previous_http_setting = ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"]
+    ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = "1"
+    ShopifyFixture.run do |run|
+      arrange_orders(run, 3)
+      config_path = run.instance_variable_get(:@config_path)
+      config = ShopifyLedger::Config.new(JSON.parse(File.read(config_path)), File.dirname(config_path))
+      checks = 0
+      counts = ShopifyLedger::Worker.new(config).drain(stop: -> { checks += 1; checks > 1 })
+
+      assert_equal({ "processed" => 1, "retry" => 0, "parked" => 0, "status" => "stopped" }, counts)
+      assert_equal [[1, 2]], run.read("SELECT SUM(processed), COUNT(*) - SUM(processed) FROM inbox")
+    end
+  ensure
+    previous_http_setting ? ENV["SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK"] = previous_http_setting : ENV.delete("SHOPIFY_LEDGER_ALLOW_HTTP_LOOPBACK")
   end
 
   def test_a_live_claim_keeps_other_workers_off_the_order_until_it_finishes
