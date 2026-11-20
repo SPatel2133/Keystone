@@ -1,8 +1,10 @@
-# Crash-safe event processing in Ruby and SQLite
+# Keystone
 
-This Ruby consumer keeps a running balance correct when events arrive out of order, arrive twice, or commit just before the sender loses its acknowledgment.
+A crash-safe Shopify payments ledger in Ruby, with SQLite and PostgreSQL backends.
 
-[![Verify event consumers](https://github.com/SPatel2133/ruby-event-consumer/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/SPatel2133/ruby-event-consumer/actions/workflows/verify.yml?query=branch%3Amain)
+The sequence-based consumer keeps a running balance correct when events arrive out of order, arrive twice, or commit just before the sender loses its acknowledgment.
+
+[![Verify Keystone](https://github.com/SPatel2133/keystone/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/SPatel2133/keystone/actions/workflows/verify.yml?query=branch%3Amain)
 
 With Ruby 3.4.13 active, reproduce the crash demo from the project root:
 
